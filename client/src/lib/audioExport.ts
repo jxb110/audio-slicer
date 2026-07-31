@@ -171,7 +171,8 @@ export async function downloadSegmentsAsZip(
   wavInfo: WavInfo | null,
   segments: AudioSegment[],
   zipFileName: string = 'audio_segments.zip',
-  audioBuffer?: AudioBuffer
+  audioBuffer?: AudioBuffer,
+  sourceBaseName: string = 'audio'
 ): Promise<void> {
   const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
@@ -189,8 +190,8 @@ export async function downloadSegmentsAsZip(
     }
 
     const fileName = segment.label
-      ? `${String(i + 1).padStart(3, '0')}_${segment.label}.wav`
-      : `${String(i + 1).padStart(3, '0')}_segment.wav`;
+      ? `${sourceBaseName}_${segment.label}_${String(i + 1).padStart(3, '0')}.wav`
+      : `${sourceBaseName}__${String(i + 1).padStart(3, '0')}.wav`;
     zip.file(fileName, fileData);
   }
 

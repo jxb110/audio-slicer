@@ -46,7 +46,10 @@ export default function SegmentList({
     setDownloadingId(seg.id);
     try {
       const baseName = audioFileName.replace(/\.[^/.]+$/, '');
-      const fileName = `${baseName}_${String(idx + 1).padStart(3, '0')}.wav`;
+      const label = seg.label || '';
+      const fileName = label
+        ? `${baseName}_${label}_${String(idx + 1).padStart(3, '0')}.wav`
+        : `${baseName}__${String(idx + 1).padStart(3, '0')}.wav`;
       if (rawArrayBuffer && wavInfo) {
         await downloadSegment(rawArrayBuffer, wavInfo, seg, fileName);
       } else if (audioBuffer) {

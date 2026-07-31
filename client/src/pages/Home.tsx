@@ -557,7 +557,8 @@ export default function Home() {
         wavInfo,
         segments,
         `${baseName}_segments.zip`,
-        audioBuffer || undefined
+        audioBuffer || undefined,
+        baseName
       );
       toast.success(`已导出 ${segments.length} 个片段`);
     } catch (err) {
