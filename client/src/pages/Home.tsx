@@ -432,11 +432,6 @@ export default function Home() {
     setMarkedEnd(null);
 
     toast.success(`片段 ${newSegments.indexOf(newSegment) + 1} 已保存`);
-
-    // 波形自动跳到结束位置
-    setTimeout(() => {
-      waveformRef.current?.seekTo(finalEnd);
-    }, 100);
   }, [markedStart, markedEnd, segments, settings, audioDuration, selectedFileId, debouncedSaveSegments]);
 
   // ---- 点击片段，聚焦波形 ----
@@ -444,7 +439,8 @@ export default function Home() {
     setSelectedSegmentId(segmentId);
     const seg = segments.find((s) => s.id === segmentId);
     if (seg) {
-      waveformRef.current?.seekTo(seg.startTime);
+      // 自动播放该片段区间
+      waveformRef.current?.playRange(seg.startTime, seg.endTime);
     }
   }, [segments]);
 
