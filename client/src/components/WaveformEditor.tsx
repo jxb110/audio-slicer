@@ -1,14 +1,16 @@
 /**
  * WaveformEditor - 核心波形编辑组件
  *
- * 修复记录 v2:
- * 1. overlay canvas 改为绘制完整 scrollWidth 宽度，通过 translateX 跟随滚动，缩放后片段位置精确
- * 2. 左键标记 IN 后自动从该位置播放；右键标记 OUT 后自动播放 IN→OUT 区间预览
- * 3. 去掉空格确认后的自动波形跳转逻辑（已在 Home.tsx 移除）
- * 4. playRange 暴露给父组件，点击片段列表时播放该片段
+ * 关键修复 v3：
+ * overlay canvas 直接插入 WaveSurfer Shadow DOM 的 .wrapper 元素内
+ * wrapper 宽度 = 波形总宽度（随缩放变化），canvas 随波形一起滚动
+ * 无需任何 translateX 技巧，片段标记始终与波形精确对齐
  */
 
-import React, { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
+import React, {
+  useEffect, useRef, useState, useCallback,
+  forwardRef, useImperativeHandle,
+} from 'react';
 import WaveSurfer from 'wavesurfer.js';
 import { Play, Pause, SkipBack, ZoomIn, ZoomOut, Volume2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -37,7 +39,6 @@ export interface WaveformEditorHandle {
   playRange: (start: number, end: number) => void;
 }
 
-// 片段颜色列表（柔和色调）
 const SEGMENT_COLORS = [
   'rgba(59, 130, 246, 0.25)',
   'rgba(16, 185, 129, 0.25)',
@@ -48,16 +49,15 @@ const SEGMENT_COLORS = [
   'rgba(20, 184, 166, 0.25)',
   'rgba(249, 115, 22, 0.25)',
 ];
-
 const SEGMENT_BORDER_COLORS = [
-  'rgba(59, 130, 246, 0.7)',
-  'rgba(16, 185, 129, 0.7)',
-  'rgba(245, 158, 11, 0.7)',
-  'rgba(239, 68, 68, 0.7)',
-  'rgba(139, 92, 246, 0.7)',
-  'rgba(236, 72, 153, 0.7)',
-  'rgba(20, 184, 166, 0.7)',
-  'rgba(249, 115, 22, 0.7)',
+  'rgba(59, 130, 246, 0.8)',
+  'rgba(16, 185, 129, 0.8)',
+  'rgba(245, 158, 11, 0.8)',
+  'rgba(239, 68, 68, 0.8)',
+  'rgba(139, 92, 246, 0.8)',
+  'rgba(236, 72, 153, 0.8)',
+  'rgba(20, 184, 166, 0.8)',
+  'rgba(249, 115, 22, 0.8)',
 ];
 
 export function getSegmentColor(index: number) {
@@ -68,32 +68,23 @@ export function getSegmentColor(index: number) {
 }
 
 const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
-  (
-    {
-      audioUrl,
-      segments,
-      silencePrefixMs,
-      silenceSuffixMs,
-      selectedSegmentId,
-      onReady,
-      onMarkStart,
-      onMarkEnd,
-      onConfirm,
-      onSegmentClick,
-      markedStart,
-      markedEnd,
-    },
-    ref
-  ) => {
+  ({
+    audioUrl, segments, silencePrefixMs, silenceSuffixMs,
+    selectedSegmentId, onReady, onMarkStart, onMarkEnd,
+    onConfirm, markedStart, markedEnd,
+  }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
-    const overlayRef = useRef<HTMLCanvasElement>(null);
+    // overlay canvas 将被动态插入 Shadow DOM，不再用 React ref 挂载
+    const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
     const wavesurferRef = useRef<WaveSurfer | null>(null);
+
     const [isPlaying, setIsPlaying] = useState(false);
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
     const [isReady, setIsReady] = useState(false);
     const [zoom, setZoom] = useState(1);
     const [volume, setVolume] = useState(1);
+
     const durationRef = useRef(0);
     const segmentsRef = useRef(segments);
     const markedStartRef = useRef(markedStart);
@@ -101,11 +92,9 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     const silencePrefixRef = useRef(silencePrefixMs);
     const silenceSuffixRef = useRef(silenceSuffixMs);
     const selectedSegmentIdRef = useRef(selectedSegmentId);
-    // 片段区间播放
     const playRangeEndRef = useRef<number | null>(null);
     const playRangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    // 保持 ref 同步
     useEffect(() => { segmentsRef.current = segments; }, [segments]);
     useEffect(() => { markedStartRef.current = markedStart; }, [markedStart]);
     useEffect(() => { markedEndRef.current = markedEnd; }, [markedEnd]);
@@ -113,17 +102,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     useEffect(() => { silenceSuffixRef.current = silenceSuffixMs; }, [silenceSuffixMs]);
     useEffect(() => { selectedSegmentIdRef.current = selectedSegmentId; }, [selectedSegmentId]);
 
-    // 获取 WaveSurfer 内部滚动容器（缓存查找逻辑）
-    const getScrollContainer = useCallback((): HTMLElement | null => {
-      const container = containerRef.current;
-      if (!container) return null;
-      return (container.querySelector('[part="scroll"]') as HTMLElement)
-        || (container.querySelector('div[style*="overflow-x"]') as HTMLElement)
-        || (container.querySelector('div[style*="overflow: auto"]') as HTMLElement)
-        || null;
-    }, []);
-
-    // 播放区间（供外部调用）
+    // ---- playRange（供外部调用，点击片段时播放区间）----
     const playRange = useCallback((start: number, end: number) => {
       const ws = wavesurferRef.current;
       if (!ws || durationRef.current === 0) return;
@@ -131,50 +110,45 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       playRangeEndRef.current = end;
       ws.seekTo(start / durationRef.current);
       ws.play();
-      const durationMs = (end - start) * 1000;
+      const ms = (end - start) * 1000;
       playRangeTimerRef.current = setTimeout(() => {
         if (wavesurferRef.current) {
           wavesurferRef.current.pause();
           if (durationRef.current > 0) wavesurferRef.current.seekTo(start / durationRef.current);
         }
         playRangeEndRef.current = null;
-      }, durationMs + 80);
+      }, ms + 80);
     }, []);
 
     useImperativeHandle(ref, () => ({
       seekTo: (time: number) => {
-        if (wavesurferRef.current && durationRef.current > 0) {
+        if (wavesurferRef.current && durationRef.current > 0)
           wavesurferRef.current.seekTo(time / durationRef.current);
-        }
       },
       getWaveSurfer: () => wavesurferRef.current,
       playRange,
     }));
 
     // ---- 绘制 overlay ----
-    // 核心修复：canvas 宽度 = scrollWidth（完整波形宽度），通过 translateX(-scrollLeft) 跟随滚动
-    // 这样无论缩放多少倍，timeToX 的坐标始终与波形像素对齐
+    // canvas 已在 wrapper 内，宽度 = wrapper.clientWidth（即波形总宽度）
+    // 高度 = wrapper.clientHeight，坐标直接用 timeToX 映射，无需任何偏移
     const drawOverlay = useCallback(() => {
-      const canvas = overlayRef.current;
-      const container = containerRef.current;
-      if (!canvas || !container || durationRef.current === 0) return;
+      const canvas = overlayCanvasRef.current;
+      if (!canvas || durationRef.current === 0) return;
 
-      const scrollEl = getScrollContainer();
-      const totalWidth = scrollEl ? scrollEl.scrollWidth : container.clientWidth;
-      const scrollLeft = scrollEl ? scrollEl.scrollLeft : 0;
-      const height = container.clientHeight;
+      const wrapper = canvas.parentElement;
+      if (!wrapper) return;
 
-      // 设置 canvas 物理尺寸
+      const totalWidth = wrapper.clientWidth;
+      const totalHeight = wrapper.clientHeight;
+      if (totalWidth === 0 || totalHeight === 0) return;
+
       canvas.width = totalWidth;
-      canvas.height = height;
-      // CSS 宽度也要跟上，否则 canvas 会被拉伸
-      canvas.style.width = `${totalWidth}px`;
-      // 通过 translateX 让 canvas 跟随滚动位置
-      canvas.style.transform = `translateX(-${scrollLeft}px)`;
+      canvas.height = totalHeight;
 
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
-      ctx.clearRect(0, 0, totalWidth, height);
+      ctx.clearRect(0, 0, totalWidth, totalHeight);
 
       const dur = durationRef.current;
       const timeToX = (t: number) => (t / dur) * totalWidth;
@@ -186,16 +160,14 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         const colors = getSegmentColor(idx);
         const isSelected = seg.id === selectedSegmentIdRef.current;
 
-        ctx.fillStyle = isSelected ? colors.bg.replace('0.25', '0.4') : colors.bg;
-        ctx.fillRect(x1, 0, x2 - x1, height);
-
+        ctx.fillStyle = isSelected ? colors.bg.replace('0.25', '0.45') : colors.bg;
+        ctx.fillRect(x1, 0, x2 - x1, totalHeight);
         ctx.strokeStyle = colors.border;
-        ctx.lineWidth = isSelected ? 2 : 1;
-        ctx.strokeRect(x1, 0, x2 - x1, height);
-
-        ctx.fillStyle = colors.border.replace('0.7', '1');
-        ctx.font = '11px JetBrains Mono, monospace';
-        ctx.fillText(`${idx + 1}`, x1 + 3, 14);
+        ctx.lineWidth = isSelected ? 2.5 : 1.5;
+        ctx.strokeRect(x1, 0, x2 - x1, totalHeight);
+        ctx.fillStyle = colors.border.replace('0.8', '1');
+        ctx.font = 'bold 11px JetBrains Mono, monospace';
+        ctx.fillText(`${idx + 1}`, x1 + 4, 15);
       });
 
       // 绘制当前标记区域（含首尾静音）
@@ -206,30 +178,29 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         const rawStart = markedStartRef.current;
         const startWithSilence = Math.max(0, rawStart - prefixSec);
         const endWithSilence = markedEndRef.current !== null
-          ? Math.min(dur, markedEndRef.current + suffixSec)
-          : null;
+          ? Math.min(dur, markedEndRef.current + suffixSec) : null;
 
         // 前置静音区域
         if (prefixSec > 0) {
           const sx1 = timeToX(startWithSilence);
           const sx2 = timeToX(rawStart);
-          ctx.fillStyle = 'rgba(99, 102, 241, 0.15)';
-          ctx.fillRect(sx1, 0, sx2 - sx1, height);
+          ctx.fillStyle = 'rgba(99, 102, 241, 0.18)';
+          ctx.fillRect(sx1, 0, sx2 - sx1, totalHeight);
           ctx.setLineDash([4, 3]);
-          ctx.strokeStyle = 'rgba(99, 102, 241, 0.6)';
+          ctx.strokeStyle = 'rgba(99, 102, 241, 0.7)';
           ctx.lineWidth = 1.5;
-          ctx.beginPath(); ctx.moveTo(sx1, 0); ctx.lineTo(sx1, height); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(sx1, 0); ctx.lineTo(sx1, totalHeight); ctx.stroke();
           ctx.setLineDash([]);
         }
 
-        // 开始标记线
+        // IN 标记线
         const sx = timeToX(rawStart);
         ctx.strokeStyle = '#4F46E5';
         ctx.lineWidth = 2;
-        ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, height); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, totalHeight); ctx.stroke();
         ctx.fillStyle = '#4F46E5';
         ctx.font = 'bold 11px JetBrains Mono, monospace';
-        ctx.fillText('IN', sx + 3, height - 4);
+        ctx.fillText('IN', sx + 3, totalHeight - 5);
 
         if (markedEndRef.current !== null && endWithSilence !== null) {
           const rawEnd = markedEndRef.current;
@@ -237,32 +208,32 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
 
           // 选中区域
           ctx.fillStyle = 'rgba(99, 102, 241, 0.12)';
-          ctx.fillRect(sx, 0, ex - sx, height);
+          ctx.fillRect(sx, 0, ex - sx, totalHeight);
 
-          // 结束标记线
+          // OUT 标记线
           ctx.strokeStyle = '#7C3AED';
           ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, height); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, totalHeight); ctx.stroke();
           ctx.fillStyle = '#7C3AED';
           ctx.font = 'bold 11px JetBrains Mono, monospace';
-          ctx.fillText('OUT', ex + 3, height - 4);
+          ctx.fillText('OUT', ex + 3, totalHeight - 5);
 
           // 后置静音区域
           if (suffixSec > 0) {
             const ex2 = timeToX(endWithSilence);
-            ctx.fillStyle = 'rgba(124, 58, 237, 0.15)';
-            ctx.fillRect(ex, 0, ex2 - ex, height);
+            ctx.fillStyle = 'rgba(124, 58, 237, 0.18)';
+            ctx.fillRect(ex, 0, ex2 - ex, totalHeight);
             ctx.setLineDash([4, 3]);
-            ctx.strokeStyle = 'rgba(124, 58, 237, 0.6)';
+            ctx.strokeStyle = 'rgba(124, 58, 237, 0.7)';
             ctx.lineWidth = 1.5;
-            ctx.beginPath(); ctx.moveTo(ex2, 0); ctx.lineTo(ex2, height); ctx.stroke();
+            ctx.beginPath(); ctx.moveTo(ex2, 0); ctx.lineTo(ex2, totalHeight); ctx.stroke();
             ctx.setLineDash([]);
           }
         }
       }
-    }, [getScrollContainer]);
+    }, []);
 
-    // 初始化 WaveSurfer
+    // ---- 初始化 WaveSurfer ----
     useEffect(() => {
       if (!containerRef.current) return;
 
@@ -289,7 +260,30 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         setDuration(dur);
         setIsReady(true);
         onReady?.(dur);
-        setTimeout(drawOverlay, 150);
+
+        // 将 overlay canvas 插入 Shadow DOM 的 wrapper 元素
+        // wrapper 的宽度 = 波形总宽度，canvas 随波形一起滚动，无需任何偏移
+        const wrapper = ws.getWrapper();
+        if (wrapper) {
+          // 移除旧 canvas（如果有）
+          const old = wrapper.querySelector('.overlay-canvas');
+          if (old) old.remove();
+
+          const canvas = document.createElement('canvas');
+          canvas.className = 'overlay-canvas';
+          canvas.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 10;
+          `;
+          wrapper.appendChild(canvas);
+          overlayCanvasRef.current = canvas;
+          setTimeout(drawOverlay, 100);
+        }
       });
 
       ws.on('play', () => setIsPlaying(true));
@@ -312,13 +306,78 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       ws.on('scroll', () => { setTimeout(drawOverlay, 30); });
 
       return () => {
-        try { ws.unAll(); ws.destroy(); } catch (e) { /* AbortError 正常忽略 */ }
+        try { ws.unAll(); ws.destroy(); } catch (_) { /* AbortError 正常忽略 */ }
         if (playRangeTimerRef.current) clearTimeout(playRangeTimerRef.current);
+        overlayCanvasRef.current = null;
         wavesurferRef.current = null;
         setIsReady(false); setIsPlaying(false); setCurrentTime(0); setDuration(0);
         durationRef.current = 0; playRangeEndRef.current = null;
       };
     }, [audioUrl]);
+
+    // ---- 鼠标事件处理（在 ready 后挂载到 Shadow DOM wrapper）----
+    // 左键：用 WaveSurfer 的 interaction 事件（内部已正确计算时间）
+    // 右键：在 wrapper 上监听 contextmenu，用 wrapper.getBoundingClientRect() 计算（与WaveSurfer内部算法一致）
+    useEffect(() => {
+      if (!isReady) return;
+      const ws = wavesurferRef.current;
+      if (!ws) return;
+
+      // 左键：WaveSurfer interaction 事件已经给出精确时间
+      const unsubInteraction = ws.on('interaction', (time: number) => {
+        onMarkStart?.(time);
+        // 从该位置开始播放
+        if (playRangeTimerRef.current) { clearTimeout(playRangeTimerRef.current); playRangeTimerRef.current = null; }
+        playRangeEndRef.current = null;
+        ws.seekTo(time / durationRef.current);
+        ws.play();
+      });
+
+      // 右键：在 Shadow DOM wrapper 上监听 contextmenu
+      const wrapper = ws.getWrapper();
+      const handleContextMenu = (e: MouseEvent) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (durationRef.current === 0) return;
+        // 与 WaveSurfer 内部完全相同的计算方式：用 wrapper.getBoundingClientRect()
+        const rect = wrapper.getBoundingClientRect();
+        const relX = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+        const time = relX * durationRef.current;
+        onMarkEnd?.(time);
+        // 右键标记 OUT 后：播放 IN→OUT 区间预览（含首尾静音）
+        const startTime = markedStartRef.current;
+        const prefixSec = silencePrefixRef.current / 1000;
+        const suffixSec = silenceSuffixRef.current / 1000;
+        if (startTime !== null && time > startTime) {
+          const playStart = Math.max(0, startTime - prefixSec);
+          const playEnd = Math.min(durationRef.current, time + suffixSec);
+          if (playRangeTimerRef.current) { clearTimeout(playRangeTimerRef.current); playRangeTimerRef.current = null; }
+          playRangeEndRef.current = playEnd;
+          ws.seekTo(playStart / durationRef.current);
+          ws.play();
+          const ms = (playEnd - playStart) * 1000;
+          playRangeTimerRef.current = setTimeout(() => {
+            if (wavesurferRef.current) {
+              wavesurferRef.current.pause();
+              if (durationRef.current > 0) wavesurferRef.current.seekTo(playStart / durationRef.current);
+            }
+            playRangeEndRef.current = null;
+          }, ms + 80);
+        } else {
+          if (playRangeTimerRef.current) { clearTimeout(playRangeTimerRef.current); playRangeTimerRef.current = null; }
+          playRangeEndRef.current = null;
+          ws.seekTo(time / durationRef.current);
+          ws.play();
+        }
+      };
+
+      if (wrapper) wrapper.addEventListener('contextmenu', handleContextMenu);
+
+      return () => {
+        unsubInteraction();
+        if (wrapper) wrapper.removeEventListener('contextmenu', handleContextMenu);
+      };
+    }, [isReady, onMarkStart, onMarkEnd]);
 
     // 重绘 overlay（当依赖变化时）
     useEffect(() => {
@@ -332,79 +391,6 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       return () => window.removeEventListener('resize', handleResize);
     }, [isReady, drawOverlay]);
 
-    // 鼠标事件处理
-    useEffect(() => {
-      const container = containerRef.current;
-      if (!container || !isReady) return;
-
-      const getTimeFromEvent = (e: MouseEvent): number => {
-        const rect = container.getBoundingClientRect();
-        const ws = wavesurferRef.current;
-        if (!ws) return 0;
-        const scrollContainer = getScrollContainer() || container;
-        const scrollLeft = scrollContainer.scrollLeft || 0;
-        const scrollWidth = scrollContainer.scrollWidth || rect.width;
-        const clickX = e.clientX - rect.left + scrollLeft;
-        const pct = Math.max(0, Math.min(1, clickX / scrollWidth));
-        return pct * durationRef.current;
-      };
-
-      const handleMouseDown = (e: MouseEvent) => {
-        if (e.button === 0) {
-          const time = getTimeFromEvent(e);
-          onMarkStart?.(time);
-          // 左键标记 IN 后，自动从该位置开始播放
-          const ws = wavesurferRef.current;
-          if (ws && durationRef.current > 0) {
-            if (playRangeTimerRef.current) { clearTimeout(playRangeTimerRef.current); playRangeTimerRef.current = null; }
-            playRangeEndRef.current = null;
-            ws.seekTo(time / durationRef.current);
-            ws.play();
-          }
-        }
-      };
-
-      const handleContextMenu = (e: MouseEvent) => {
-        e.preventDefault();
-        const time = getTimeFromEvent(e);
-        onMarkEnd?.(time);
-        // 右键标记 OUT 后：播放 IN→OUT 区间预览（含首尾静音）
-        const ws = wavesurferRef.current;
-        if (ws && durationRef.current > 0) {
-          const startTime = markedStartRef.current;
-          const prefixSec = silencePrefixRef.current / 1000;
-          const suffixSec = silenceSuffixRef.current / 1000;
-          if (startTime !== null && time > startTime) {
-            const playStart = Math.max(0, startTime - prefixSec);
-            const playEnd = Math.min(durationRef.current, time + suffixSec);
-            if (playRangeTimerRef.current) { clearTimeout(playRangeTimerRef.current); playRangeTimerRef.current = null; }
-            playRangeEndRef.current = playEnd;
-            ws.seekTo(playStart / durationRef.current);
-            ws.play();
-            const durationMs = (playEnd - playStart) * 1000;
-            playRangeTimerRef.current = setTimeout(() => {
-              if (wavesurferRef.current) {
-                wavesurferRef.current.pause();
-                if (durationRef.current > 0) wavesurferRef.current.seekTo(playStart / durationRef.current);
-              }
-              playRangeEndRef.current = null;
-            }, durationMs + 80);
-          } else {
-            if (playRangeTimerRef.current) { clearTimeout(playRangeTimerRef.current); playRangeTimerRef.current = null; }
-            playRangeEndRef.current = null;
-            ws.seekTo(time / durationRef.current);
-            ws.play();
-          }
-        }
-      };
-
-      container.addEventListener('mousedown', handleMouseDown);
-      container.addEventListener('contextmenu', handleContextMenu);
-      return () => {
-        container.removeEventListener('mousedown', handleMouseDown);
-        container.removeEventListener('contextmenu', handleContextMenu);
-      };
-    }, [isReady, onMarkStart, onMarkEnd, getScrollContainer]);
 
     // 空格键确认
     useEffect(() => {
@@ -422,7 +408,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     useEffect(() => {
       if (wavesurferRef.current && isReady) {
         wavesurferRef.current.zoom(zoom * 100);
-        // 等待 WaveSurfer 重绘完成后再重绘 overlay（缩放后 scrollWidth 变化）
+        // 等待 WaveSurfer 重绘完成后再重绘 overlay（wrapper 宽度已变化）
         setTimeout(drawOverlay, 200);
       }
     }, [zoom, isReady, drawOverlay]);
@@ -438,9 +424,6 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       return `${m}:${s.padStart(6, '0')}`;
     };
 
-    const togglePlay = () => { wavesurferRef.current?.playPause(); };
-    const handleReset = () => { wavesurferRef.current?.seekTo(0); };
-
     return (
       <div className="flex flex-col gap-2">
         {/* 波形容器 */}
@@ -452,12 +435,6 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
             ref={containerRef}
             className="w-full h-full"
             style={{ cursor: 'crosshair' }}
-          />
-          {/* Overlay canvas：absolute top-0 left-0，宽度由 JS 控制，translateX 跟随滚动 */}
-          <canvas
-            ref={overlayRef}
-            className="absolute top-0 left-0 pointer-events-none"
-            style={{ height: '100%' }}
           />
           {!isReady && (
             <div className="absolute inset-0 flex items-center justify-center bg-slate-900/80">
@@ -471,14 +448,17 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
 
         {/* 控制栏 */}
         <div className="flex items-center gap-3 px-1">
-          <Button size="sm" variant="outline" onClick={handleReset} className="h-8 w-8 p-0" title="回到开头">
+          <Button size="sm" variant="outline"
+            onClick={() => wavesurferRef.current?.seekTo(0)}
+            className="h-8 w-8 p-0" title="回到开头">
             <SkipBack className="w-3.5 h-3.5" />
           </Button>
-          <Button size="sm" onClick={togglePlay} className="h-8 w-8 p-0" disabled={!isReady} title="播放/暂停">
+          <Button size="sm"
+            onClick={() => wavesurferRef.current?.playPause()}
+            className="h-8 w-8 p-0" disabled={!isReady} title="播放/暂停">
             {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
           </Button>
 
-          {/* 时间显示 */}
           <div className="text-xs font-mono text-slate-500 tabular-nums">
             {formatTime(currentTime)} / {formatTime(duration)}
           </div>
@@ -489,10 +469,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
           <div className="flex items-center gap-1.5">
             <Volume2 className="w-3.5 h-3.5 text-slate-500" />
             <Slider
-              value={[volume]}
-              min={0}
-              max={1}
-              step={0.05}
+              value={[volume]} min={0} max={1} step={0.05}
               onValueChange={([v]) => setVolume(v)}
               className="w-20"
             />
@@ -500,11 +477,15 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
 
           {/* 缩放 */}
           <div className="flex items-center gap-1">
-            <Button size="sm" variant="ghost" onClick={() => setZoom((z) => Math.max(0.5, z - 0.5))} className="h-7 w-7 p-0" title="缩小">
+            <Button size="sm" variant="ghost"
+              onClick={() => setZoom((z) => Math.max(0.5, z - 0.5))}
+              className="h-7 w-7 p-0" title="缩小">
               <ZoomOut className="w-3.5 h-3.5" />
             </Button>
             <span className="text-xs text-slate-500 w-10 text-center font-mono">{zoom.toFixed(1)}x</span>
-            <Button size="sm" variant="ghost" onClick={() => setZoom((z) => Math.min(20, z + 0.5))} className="h-7 w-7 p-0" title="放大">
+            <Button size="sm" variant="ghost"
+              onClick={() => setZoom((z) => Math.min(20, z + 0.5))}
+              className="h-7 w-7 p-0" title="放大">
               <ZoomIn className="w-3.5 h-3.5" />
             </Button>
           </div>
