@@ -179,6 +179,8 @@ export default function Home() {
   const waveformRef = useRef<WaveformEditorHandle>(null);
   const objectUrlRef = useRef<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 并发保护：记录当前正在加载的 fileId，避免多次触发
+  const loadingFileIdRef = useRef<string | null>(null);
 
   // ---- 初始化：从 IndexedDB 加载数据 ----
   useEffect(() => {
@@ -201,6 +203,10 @@ export default function Home() {
 
   // ---- 加载音频文件 ----
   const loadAudioFile = useCallback(async (fileId: string) => {
+    // 并发保护：如果已经在加载同一个文件，跳过
+    if (loadingFileIdRef.current === fileId) return;
+    loadingFileIdRef.current = fileId;
+
     setIsLoadingFile(true);
     setAudioBuffer(null);
     setMarkedStart(null);
@@ -216,45 +222,81 @@ export default function Home() {
 
     try {
       const data = await loadFileData(fileId);
+
+      // 检查是否已被取消（用户切换到其他文件）
+      if (loadingFileIdRef.current !== fileId) return;
+
       if (!data) {
         toast.error('无法加载音频文件数据');
         return;
       }
 
-      const fileRecord = audioFiles.find((f) => f.id === fileId);
-      if (!fileRecord) return;
+      // 从 audioFiles state 或直接从 IndexedDB 获取文件记录
+      const allFiles = await loadAudioFiles();
+      const fileRecord = allFiles.find((f) => f.id === fileId);
+      if (!fileRecord) {
+        toast.error('找不到文件记录');
+        return;
+      }
+
+      if (loadingFileIdRef.current !== fileId) return;
 
       const blob = new Blob([data], { type: fileRecord.type || 'audio/wav' });
       const url = URL.createObjectURL(blob);
       objectUrlRef.current = url;
       setAudioUrl(url);
 
-      // 解码 AudioBuffer
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-      const buffer = await audioCtx.decodeAudioData(data.slice(0));
-      await audioCtx.close();
-      setAudioBuffer(buffer);
+      // 解码 AudioBuffer（用于 VAD 和导出）
+      try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const buffer = await audioCtx.decodeAudioData(data.slice(0));
+        await audioCtx.close();
+        if (loadingFileIdRef.current === fileId) {
+          setAudioBuffer(buffer);
+        }
+      } catch (decodeErr) {
+        console.warn('AudioBuffer 解码失败（不影响波形播放）:', decodeErr);
+      }
 
       // 加载片段
       const segs = await loadSegments(fileId);
-      setSegments(segs);
+      if (loadingFileIdRef.current === fileId) {
+        setSegments(segs);
+      }
     } catch (err) {
-      toast.error('加载音频失败: ' + (err as Error).message);
+      if (loadingFileIdRef.current === fileId) {
+        toast.error('加载音频失败: ' + (err as Error).message);
+      }
     } finally {
-      setIsLoadingFile(false);
+      if (loadingFileIdRef.current === fileId) {
+        loadingFileIdRef.current = null;
+        setIsLoadingFile(false);
+      }
     }
-  }, [audioFiles]);
+  // 移除 audioFiles 依赖，改为直接读 IndexedDB，避免 stale closure
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---- 选择文件 ----
   const handleSelectFile = useCallback(async (fileId: string) => {
     if (fileId === selectedFileId) return;
+    loadingFileIdRef.current = null; // 取消当前加载
     setSelectedFileId(fileId);
-    await loadAudioFile(fileId);
-  }, [selectedFileId, loadAudioFile]);
+  }, [selectedFileId]);
+
+  // selectedFileId 变化时触发加载（唯一触发点）
+  useEffect(() => {
+    if (selectedFileId) {
+      loadAudioFile(selectedFileId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFileId]);
 
   // ---- 上传文件 ----
   const handleFileUpload = useCallback(async (files: FileList | null) => {
     if (!files || files.length === 0) return;
+
+    let firstNewId: string | null = null;
 
     for (const file of Array.from(files)) {
       if (!file.type.startsWith('audio/')) {
@@ -280,25 +322,21 @@ export default function Home() {
         setAudioFiles((prev) => [...prev, record]);
         toast.success(`已上传: ${file.name}`);
 
-        // 自动选中第一个上传的文件
-        if (!selectedFileId) {
-          setSelectedFileId(id);
-          // 需要等 audioFiles 更新后再 loadAudioFile
-          setTimeout(() => loadAudioFile(id), 100);
+        // 记录第一个新上传的文件 id
+        if (!firstNewId) {
+          firstNewId = id;
         }
       } catch (err) {
         toast.error(`上传失败: ${file.name}`);
       }
     }
-  }, [selectedFileId, loadAudioFile]);
 
-  // 当 audioFiles 更新后，如果有待加载的文件则加载
-  useEffect(() => {
-    if (selectedFileId && audioFiles.find((f) => f.id === selectedFileId) && !audioUrl && !isLoadingFile) {
-      loadAudioFile(selectedFileId);
+    // 上传完成后，如果没有选中文件，自动选中第一个新文件
+    // setSelectedFileId 会触发 useEffect([selectedFileId]) 来加载，只触发一次
+    if (firstNewId && !selectedFileId) {
+      setSelectedFileId(firstNewId);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [audioFiles.length, selectedFileId]);
+  }, [selectedFileId]);
 
   // ---- 删除文件 ----
   const handleDeleteFile = useCallback(async (fileId: string) => {

@@ -284,7 +284,13 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       });
 
       return () => {
-        ws.destroy();
+        // 先移除所有事件监听，再 destroy，捕获 AbortError
+        try {
+          ws.unAll();
+          ws.destroy();
+        } catch (e) {
+          // WaveSurfer destroy 时可能抛出 AbortError，属于正常清理行为，忽略
+        }
         wavesurferRef.current = null;
         setIsReady(false);
         setIsPlaying(false);
