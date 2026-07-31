@@ -578,13 +578,6 @@ export default function Home() {
 
         <div className="w-px h-5 bg-slate-200 mx-1" />
 
-        {/* 快捷键提示 */}
-        <div className="flex items-center gap-3 text-xs text-slate-500">
-          <span className="font-mono"><kbd className="bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-xs shadow-sm">LClick</kbd> <span className="text-slate-500">mark IN</span></span>
-          <span className="font-mono"><kbd className="bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-xs shadow-sm">RClick</kbd> <span className="text-slate-500">mark OUT</span></span>
-          <span className="font-mono"><kbd className="bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-xs shadow-sm">Space</kbd> <span className="text-slate-500">confirm</span></span>
-        </div>
-
         <div className="flex-1" />
 
         {/* 设置按钮 */}

@@ -404,6 +404,23 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       return () => window.removeEventListener('keydown', handleKeyDown);
     }, [onConfirm]);
 
+    // ---- Shift + 滚轮 → 左右平移波形 ----
+    useEffect(() => {
+      const container = containerRef.current;
+      if (!container || !isReady) return;
+      const handleWheel = (e: WheelEvent) => {
+        if (!e.shiftKey) return;
+        e.preventDefault();
+        const ws = wavesurferRef.current;
+        if (!ws) return;
+        const delta = e.deltaY !== 0 ? e.deltaY : e.deltaX;
+        const current = ws.getScroll();
+        ws.setScroll(current + delta * 1.5);
+      };
+      container.addEventListener('wheel', handleWheel, { passive: false });
+      return () => container.removeEventListener('wheel', handleWheel);
+    }, [isReady]);
+
     // 缩放
     useEffect(() => {
       if (wavesurferRef.current && isReady) {
@@ -426,6 +443,38 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
 
     return (
       <div className="flex flex-col gap-2">
+        {/* 快捷键提示条 */}
+        <div className="flex items-center gap-3 px-1 text-xs select-none">
+          <span className="flex items-center gap-1 text-slate-500">
+            <kbd className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono shadow-sm leading-none">
+              LClick
+            </kbd>
+            <span className="text-slate-400">mark IN</span>
+          </span>
+          <span className="flex items-center gap-1 text-slate-500">
+            <kbd className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono shadow-sm leading-none">
+              RClick
+            </kbd>
+            <span className="text-slate-400">mark OUT</span>
+          </span>
+          <span className="flex items-center gap-1 text-slate-500">
+            <kbd className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono shadow-sm leading-none">
+              Space
+            </kbd>
+            <span className="text-slate-400">confirm</span>
+          </span>
+          <span className="flex items-center gap-1 text-slate-500">
+            <kbd className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono shadow-sm leading-none">
+              Shift
+            </kbd>
+            <span className="text-slate-400">+</span>
+            <kbd className="inline-flex items-center gap-0.5 bg-slate-800 text-slate-200 border border-slate-600 rounded px-1.5 py-0.5 text-[10px] font-mono shadow-sm leading-none">
+              Scroll
+            </kbd>
+            <span className="text-slate-400">pan</span>
+          </span>
+        </div>
+
         {/* 波形容器 */}
         <div
           className="relative rounded-lg overflow-hidden bg-slate-900 border border-slate-700"
@@ -459,11 +508,27 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
             {isPlaying ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
           </Button>
 
-          <div className="text-xs font-mono text-slate-500 tabular-nums">
+          <div className="text-xs font-mono text-slate-500 tabular-nums flex-shrink-0">
             {formatTime(currentTime)} / {formatTime(duration)}
           </div>
 
-          <div className="flex-1" />
+          {/* 播放进度条 */}
+          <div className="flex-1 min-w-0">
+            <Slider
+              value={[duration > 0 ? currentTime / duration : 0]}
+              min={0}
+              max={1}
+              step={0.0001}
+              onValueChange={([v]) => {
+                const ws = wavesurferRef.current;
+                if (ws && duration > 0) {
+                  ws.seekTo(v);
+                }
+              }}
+              disabled={!isReady}
+              className="w-full"
+            />
+          </div>
 
           {/* 音量 */}
           <div className="flex items-center gap-1.5">
