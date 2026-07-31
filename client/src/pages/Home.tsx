@@ -59,7 +59,7 @@ import WaveformEditor, { WaveformEditorHandle } from '@/components/WaveformEdito
 import SegmentList from '@/components/SegmentList';
 import SegmentEditDialog from '@/components/SegmentEditDialog';
 import SettingsPanel from '@/components/SettingsPanel';
-import { AudioSegment, decodeAudioFile, downloadSegmentsAsZip, exportSegmentsAsCSV } from '@/lib/audioExport';
+import { AudioSegment, parseWavHeader, WavInfo, decodeAudioForVAD, downloadSegmentsAsZip, exportSegmentsAsCSV } from '@/lib/audioExport';
 import {
   AudioFileRecord,
   AppSettings,
@@ -144,6 +144,9 @@ export default function Home() {
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
+  // 原始 ArrayBuffer（用于导出，保持源文件采样率）
+  const [rawArrayBuffer, setRawArrayBuffer] = useState<ArrayBuffer | null>(null);
+  const [wavInfo, setWavInfo] = useState<WavInfo | null>(null);
   const [audioDuration, setAudioDuration] = useState(0);
   const [isLoadingFile, setIsLoadingFile] = useState(false);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -209,6 +212,8 @@ export default function Home() {
 
     setIsLoadingFile(true);
     setAudioBuffer(null);
+    setRawArrayBuffer(null);
+    setWavInfo(null);
     setMarkedStart(null);
     setMarkedEnd(null);
     setSelectedSegmentId(null);
@@ -246,11 +251,16 @@ export default function Home() {
       objectUrlRef.current = url;
       setAudioUrl(url);
 
-      // 解码 AudioBuffer（用于 VAD 和导出）
+      // 保存原始 ArrayBuffer（用于导出，保持源文件采样率）
+      if (loadingFileIdRef.current === fileId) {
+        setRawArrayBuffer(data);
+        const info = parseWavHeader(data);
+        setWavInfo(info);
+      }
+
+      // 解码 AudioBuffer（仅用于 VAD 检测）
       try {
-        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const buffer = await audioCtx.decodeAudioData(data.slice(0));
-        await audioCtx.close();
+        const buffer = await decodeAudioForVAD(data);
         if (loadingFileIdRef.current === fileId) {
           setAudioBuffer(buffer);
         }
@@ -350,6 +360,8 @@ export default function Home() {
         setSelectedFileId(null);
         setAudioUrl(null);
         setAudioBuffer(null);
+        setRawArrayBuffer(null);
+        setWavInfo(null);
         setSegments([]);
         setMarkedStart(null);
         setMarkedEnd(null);
@@ -536,18 +548,24 @@ export default function Home() {
 
   // ---- 批量导出 ----
   const handleExportZip = useCallback(async () => {
-    if (!audioBuffer || segments.length === 0) return;
+    if ((!rawArrayBuffer && !audioBuffer) || segments.length === 0) return;
     setIsExporting(true);
     try {
       const baseName = (selectedFile?.name || 'audio').replace(/\.[^/.]+$/, '');
-      await downloadSegmentsAsZip(audioBuffer, segments, `${baseName}_segments.zip`);
+      await downloadSegmentsAsZip(
+        rawArrayBuffer || new ArrayBuffer(0),
+        wavInfo,
+        segments,
+        `${baseName}_segments.zip`,
+        audioBuffer || undefined
+      );
       toast.success(`已导出 ${segments.length} 个片段`);
     } catch (err) {
       toast.error('导出失败: ' + (err as Error).message);
     } finally {
       setIsExporting(false);
     }
-  }, [audioBuffer, segments, selectedFile]);
+  }, [rawArrayBuffer, wavInfo, audioBuffer, segments, selectedFile]);
 
   const handleExportCSV = useCallback(() => {
     if (segments.length === 0) return;
@@ -696,7 +714,7 @@ export default function Home() {
                     size="sm"
                     variant="outline"
                     onClick={handleRunVAD}
-                    disabled={isRunningVAD || !audioBuffer}
+                    disabled={isRunningVAD || (!audioBuffer && !rawArrayBuffer)}
                     className="h-8 gap-1.5 text-xs"
                   >
                     {isRunningVAD ? (
@@ -713,7 +731,7 @@ export default function Home() {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={segments.length === 0 || isExporting}
+                        disabled={segments.length === 0 || isExporting || (!rawArrayBuffer && !audioBuffer)}
                         className="h-8 gap-1.5 text-xs"
                       >
                         {isExporting ? (
@@ -792,6 +810,8 @@ export default function Home() {
                   segments={segments}
                   selectedSegmentId={selectedSegmentId}
                   audioBuffer={audioBuffer}
+                  rawArrayBuffer={rawArrayBuffer}
+                  wavInfo={wavInfo}
                   audioFileName={selectedFile.name}
                   onSelect={handleSegmentClick}
                   onDelete={handleDeleteSegment}

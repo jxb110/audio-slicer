@@ -7,7 +7,7 @@ import React, { useState } from 'react';
 import { Trash2, Edit2, CheckCircle, Cpu, User, Download, ChevronDown, ChevronUp } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { AudioSegment, downloadSegment } from '@/lib/audioExport';
+import { AudioSegment, WavInfo, downloadSegment, audioBufferToWavFallbackExport } from '@/lib/audioExport';
 import { getSegmentColor } from './WaveformEditor';
 import { toast } from 'sonner';
 
@@ -15,6 +15,8 @@ interface SegmentListProps {
   segments: AudioSegment[];
   selectedSegmentId: string | null;
   audioBuffer: AudioBuffer | null;
+  rawArrayBuffer?: ArrayBuffer | null;
+  wavInfo?: WavInfo | null;
   audioFileName: string;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
@@ -29,6 +31,8 @@ export default function SegmentList({
   segments,
   selectedSegmentId,
   audioBuffer,
+  rawArrayBuffer,
+  wavInfo,
   audioFileName,
   onSelect,
   onDelete,
@@ -38,12 +42,17 @@ export default function SegmentList({
 
   const handleDownload = async (e: React.MouseEvent, seg: AudioSegment, idx: number) => {
     e.stopPropagation();
-    if (!audioBuffer || downloadingId) return;
+    if ((!rawArrayBuffer && !audioBuffer) || downloadingId) return;
     setDownloadingId(seg.id);
     try {
       const baseName = audioFileName.replace(/\.[^/.]+$/, '');
       const fileName = `${baseName}_${String(idx + 1).padStart(3, '0')}.wav`;
-      await downloadSegment(audioBuffer, seg, fileName);
+      if (rawArrayBuffer && wavInfo) {
+        await downloadSegment(rawArrayBuffer, wavInfo, seg, fileName);
+      } else if (audioBuffer) {
+        // 兜底：非WAV格式用AudioBuffer导出
+        await audioBufferToWavFallbackExport(audioBuffer, seg, fileName);
+      }
       toast.success(`片段 ${idx + 1} 已下载`);
     } catch (err) {
       toast.error('下载失败: ' + (err as Error).message);
