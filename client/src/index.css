@@ -47,6 +47,7 @@
   --primary-foreground: var(--color-blue-50);
   --sidebar-primary: var(--color-blue-600);
   --sidebar-primary-foreground: var(--color-blue-50);
+  --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
   --chart-1: var(--color-blue-300);
   --chart-2: var(--color-blue-500);
   --chart-3: var(--color-blue-600);

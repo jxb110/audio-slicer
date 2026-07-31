@@ -28,7 +28,7 @@ function App() {
     <ErrorBoundary>
       <ThemeProvider
         defaultTheme="light"
-        // switchable
+        // switchable (light mode for tool aesthetic)
       >
         <TooltipProvider>
           <Toaster />
