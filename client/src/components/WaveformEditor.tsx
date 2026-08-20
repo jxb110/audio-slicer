@@ -20,6 +20,9 @@ import { AudioSegment } from '@/lib/audioExport';
 interface WaveformEditorProps {
   audioUrl: string;
   audioFile: File | null;
+  /** 长音频的预计算峰值；存在时WaveSurfer不再解码完整音频。 */
+  waveformPeaks?: number[] | null;
+  waveformDuration?: number | null;
   segments: AudioSegment[];
   silencePrefixMs: number;
   silenceSuffixMs: number;
@@ -69,7 +72,7 @@ export function getSegmentColor(index: number) {
 
 const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
   ({
-    audioUrl, segments, silencePrefixMs, silenceSuffixMs,
+    audioUrl, waveformPeaks, waveformDuration, segments, silencePrefixMs, silenceSuffixMs,
     selectedSegmentId, onReady, onMarkStart, onMarkEnd,
     onConfirm, markedStart, markedEnd,
   }, ref) => {
@@ -237,6 +240,10 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     useEffect(() => {
       if (!containerRef.current) return;
 
+      // 长音频即使使用预计算峰值，过高的初始像素密度也会生成超宽画布。
+      // 初始以概览模式加载，用户仍可通过缩放控件查看局部细节。
+      const initialPxPerSecond = waveformDuration && waveformDuration >= 30 * 60 ? 12 : 100;
+
       const ws = WaveSurfer.create({
         container: containerRef.current,
         waveColor: '#94A3B8',
@@ -245,14 +252,20 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         cursorWidth: 2,
         height: 160,
         normalize: true,
-        minPxPerSec: 100,
+        minPxPerSec: initialPxPerSecond,
         fillParent: true,
         interact: true,
         autoCenter: true,
       });
 
       wavesurferRef.current = ws;
-      ws.load(audioUrl);
+      // 大于数十分钟的音频不能在浏览器中完整解码。传入预计算峰值和时长后，
+      // WaveSurfer只渲染峰值，播放交由HTML媒体元素流式处理。
+      if (waveformPeaks?.length && waveformDuration && waveformDuration > 0) {
+        ws.load(audioUrl, [waveformPeaks], waveformDuration);
+      } else {
+        ws.load(audioUrl);
+      }
 
       ws.on('ready', () => {
         const dur = ws.getDuration();
@@ -313,7 +326,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         setIsReady(false); setIsPlaying(false); setCurrentTime(0); setDuration(0);
         durationRef.current = 0; playRangeEndRef.current = null;
       };
-    }, [audioUrl]);
+    }, [audioUrl, waveformDuration, waveformPeaks]);
 
     // ---- 鼠标事件处理（在 ready 后挂载到 Shadow DOM wrapper）----
     // 左键：用 WaveSurfer 的 interaction 事件（内部已正确计算时间）

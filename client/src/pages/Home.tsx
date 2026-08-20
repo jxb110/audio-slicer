@@ -60,19 +60,14 @@ import SegmentList from '@/components/SegmentList';
 import SegmentEditDialog from '@/components/SegmentEditDialog';
 import SettingsPanel from '@/components/SettingsPanel';
 import { AudioSegment, parseWavHeader, WavInfo, decodeAudioForVAD, downloadSegmentsAsZip, exportSegmentsAsCSV } from '@/lib/audioExport';
+import { trpc } from '@/lib/trpc';
+import { analyzeAudioForUpload } from '@/lib/longAudio';
+import { AppSettings, AudioFileRecord, DEFAULT_SETTINGS } from '@/lib/persistenceTypes';
 import {
-  AudioFileRecord,
-  AppSettings,
-  saveAudioFile,
-  loadAudioFiles,
-  deleteAudioFile,
-  saveFileData,
-  loadFileData,
-  saveSegments,
-  loadSegments,
-  deleteSegments,
-  saveSettings,
-  loadSettings,
+  loadSegments as loadCachedSegments,
+  loadSettings as loadCachedSettings,
+  saveSegments as saveCachedSegments,
+  saveSettings as saveCachedSettings,
 } from '@/lib/storage';
 
 function formatFileSize(bytes: number): string {
@@ -85,6 +80,23 @@ function formatDuration(s: number): string {
   const m = Math.floor(s / 60);
   const sec = Math.floor(s % 60);
   return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+/** 仅加载媒体元数据，避免为非WAV长音频解码整个文件。 */
+function readMediaDuration(file: File): Promise<number> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const audio = document.createElement('audio');
+    const finish = (duration: number) => {
+      URL.revokeObjectURL(url);
+      audio.remove();
+      resolve(Number.isFinite(duration) && duration > 0 ? duration : 0);
+    };
+    audio.preload = 'metadata';
+    audio.onloadedmetadata = () => finish(audio.duration);
+    audio.onerror = () => finish(0);
+    audio.src = url;
+  });
 }
 
 // 空状态波形预览组件（模拟波形和时间轴，传达工具定位）
@@ -140,7 +152,27 @@ function EmptyWaveformPreview() {
 
 export default function Home() {
   // ---- 文件状态 ----
-  const [audioFiles, setAudioFiles] = useState<AudioFileRecord[]>([]);
+  const utils = trpc.useUtils();
+  const audioFilesQuery = trpc.audio.list.useQuery(undefined, { retry: false });
+  const settingsQuery = trpc.settings.get.useQuery(undefined, { retry: false });
+  const uploadIntentMutation = trpc.audio.createUploadIntent.useMutation();
+  const completeUploadMutation = trpc.audio.completeUpload.useMutation();
+  const deleteAudioMutation = trpc.audio.delete.useMutation();
+  const replaceSegmentsMutation = trpc.segments.replaceAll.useMutation();
+  const saveSettingsMutation = trpc.settings.save.useMutation();
+  const audioFiles = useMemo<AudioFileRecord[]>(() => (audioFilesQuery.data || []).map((file) => ({
+    id: file.id,
+    name: file.originalName,
+    size: Number(file.sizeBytes),
+    type: file.mimeType,
+    storageUrl: file.storageUrl,
+    durationMs: file.durationMs,
+    sampleRate: file.sampleRate,
+    bitDepth: file.bitDepth,
+    numChannels: file.numChannels,
+    waveformPeaks: Array.isArray(file.waveformPeaks) ? file.waveformPeaks.map(Number) : null,
+    waveformBucketCount: file.waveformBucketCount,
+  })), [audioFilesQuery.data]);
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
@@ -162,13 +194,7 @@ export default function Home() {
   const [markedEnd, setMarkedEnd] = useState<number | null>(null);
 
   // ---- 设置 ----
-  const [settings, setSettings] = useState<AppSettings>({
-    silencePrefixMs: 200,
-    silenceSuffixMs: 200,
-    vadEnergyThreshold: 0.01,
-    vadMaxSilenceDuration: 0.5,
-    vadMinSpeechDuration: 0.1,
-  });
+  const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [showSettings, setShowSettings] = useState(false);
 
   // ---- VAD ----
@@ -180,23 +206,51 @@ export default function Home() {
   // ---- Refs ----
   const fileInputRef = useRef<HTMLInputElement>(null);
   const waveformRef = useRef<WaveformEditorHandle>(null);
-  const objectUrlRef = useRef<string | null>(null);
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 并发保护：记录当前正在加载的 fileId，避免多次触发
   const loadingFileIdRef = useRef<string | null>(null);
 
-  // ---- 初始化：从 IndexedDB 加载数据 ----
+  const segmentsQuery = trpc.segments.list.useQuery(
+    { audioFileId: selectedFileId || '' },
+    { enabled: !!selectedFileId, retry: false },
+  );
+
+  // ---- 初始化：读取后端已持久化的设置与片段 ----
   useEffect(() => {
-    (async () => {
-      try {
-        const [files, s] = await Promise.all([loadAudioFiles(), loadSettings()]);
-        setAudioFiles(files);
-        setSettings(s);
-      } catch (err) {
-        console.error('加载数据失败:', err);
-      }
-    })();
-  }, []);
+    if (settingsQuery.data) {
+      setSettings({
+        silencePrefixMs: settingsQuery.data.silencePrefixMs,
+        silenceSuffixMs: settingsQuery.data.silenceSuffixMs,
+        vadEnergyThreshold: Number(settingsQuery.data.vadEnergyThreshold),
+        vadMaxSilenceDuration: settingsQuery.data.vadMaxSilenceDurationMs / 1000,
+        vadMinSpeechDuration: settingsQuery.data.vadMinSpeechDurationMs / 1000,
+      });
+      return;
+    }
+    if (settingsQuery.error) {
+      loadCachedSettings().then(setSettings).catch(() => undefined);
+    }
+  }, [settingsQuery.data, settingsQuery.error]);
+
+  useEffect(() => {
+    if (!selectedFileId) {
+      setSegments([]);
+      return;
+    }
+    if (segmentsQuery.data) {
+      setSegments(segmentsQuery.data.map((segment) => ({
+        id: segment.id,
+        startTime: segment.startMs / 1000,
+        endTime: segment.endMs / 1000,
+        label: segment.label || undefined,
+        source: segment.source,
+        isConfirmed: segment.isConfirmed,
+        color: segment.color || undefined,
+      })));
+    } else if (segmentsQuery.error) {
+      loadCachedSegments(selectedFileId).then(setSegments).catch(() => undefined);
+    }
+  }, [selectedFileId, segmentsQuery.data, segmentsQuery.error]);
 
   // ---- 当前选中文件 ----
   const selectedFile = useMemo(
@@ -204,12 +258,27 @@ export default function Home() {
     [audioFiles, selectedFileId]
   );
 
+  /** 仅在VAD或导出时读取完整文件；日常波形渲染使用已持久化的峰值。 */
+  const ensureRawAudioData = useCallback(async (): Promise<ArrayBuffer | null> => {
+    if (rawArrayBuffer) return rawArrayBuffer;
+    if (!selectedFile) return null;
+    try {
+      const response = await fetch(selectedFile.storageUrl);
+      if (!response.ok) throw new Error(`下载音频失败（${response.status}）`);
+      const data = await response.arrayBuffer();
+      setRawArrayBuffer(data);
+      setWavInfo(parseWavHeader(data));
+      return data;
+    } catch (error) {
+      toast.error(`读取原始音频失败：${(error as Error).message}`);
+      return null;
+    }
+  }, [rawArrayBuffer, selectedFile]);
+
   // ---- 加载音频文件 ----
   const loadAudioFile = useCallback(async (fileId: string) => {
-    // 并发保护：如果已经在加载同一个文件，跳过
     if (loadingFileIdRef.current === fileId) return;
     loadingFileIdRef.current = fileId;
-
     setIsLoadingFile(true);
     setAudioBuffer(null);
     setRawArrayBuffer(null);
@@ -217,65 +286,19 @@ export default function Home() {
     setMarkedStart(null);
     setMarkedEnd(null);
     setSelectedSegmentId(null);
-
-    // 释放旧的 URL
-    if (objectUrlRef.current) {
-      URL.revokeObjectURL(objectUrlRef.current);
-      objectUrlRef.current = null;
-    }
     setAudioUrl(null);
 
     try {
-      const data = await loadFileData(fileId);
-
-      // 检查是否已被取消（用户切换到其他文件）
+      const fileRecord = audioFiles.find((file) => file.id === fileId);
+      if (!fileRecord) throw new Error('找不到文件记录');
       if (loadingFileIdRef.current !== fileId) return;
 
-      if (!data) {
-        toast.error('无法加载音频文件数据');
-        return;
-      }
-
-      // 从 audioFiles state 或直接从 IndexedDB 获取文件记录
-      const allFiles = await loadAudioFiles();
-      const fileRecord = allFiles.find((f) => f.id === fileId);
-      if (!fileRecord) {
-        toast.error('找不到文件记录');
-        return;
-      }
-
-      if (loadingFileIdRef.current !== fileId) return;
-
-      const blob = new Blob([data], { type: fileRecord.type || 'audio/wav' });
-      const url = URL.createObjectURL(blob);
-      objectUrlRef.current = url;
-      setAudioUrl(url);
-
-      // 保存原始 ArrayBuffer（用于导出，保持源文件采样率）
+      // 波形使用持久化的峰值数组，加载时不再下载或解码完整长音频。
+      setAudioUrl(fileRecord.storageUrl);
+      setAudioDuration(fileRecord.durationMs / 1000);
+    } catch (error) {
       if (loadingFileIdRef.current === fileId) {
-        setRawArrayBuffer(data);
-        const info = parseWavHeader(data);
-        setWavInfo(info);
-      }
-
-      // 解码 AudioBuffer（仅用于 VAD 检测）
-      try {
-        const buffer = await decodeAudioForVAD(data);
-        if (loadingFileIdRef.current === fileId) {
-          setAudioBuffer(buffer);
-        }
-      } catch (decodeErr) {
-        console.warn('AudioBuffer 解码失败（不影响波形播放）:', decodeErr);
-      }
-
-      // 加载片段
-      const segs = await loadSegments(fileId);
-      if (loadingFileIdRef.current === fileId) {
-        setSegments(segs);
-      }
-    } catch (err) {
-      if (loadingFileIdRef.current === fileId) {
-        toast.error('加载音频失败: ' + (err as Error).message);
+        toast.error(`加载音频失败：${(error as Error).message}`);
       }
     } finally {
       if (loadingFileIdRef.current === fileId) {
@@ -283,9 +306,7 @@ export default function Home() {
         setIsLoadingFile(false);
       }
     }
-  // 移除 audioFiles 依赖，改为直接读 IndexedDB，避免 stale closure
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [audioFiles]);
 
   // ---- 选择文件 ----
   const handleSelectFile = useCallback(async (fileId: string) => {
@@ -315,29 +336,44 @@ export default function Home() {
       }
 
       const id = nanoid();
-      const record: AudioFileRecord = {
-        id,
-        name: file.name,
-        size: file.size,
-        type: file.type,
-        lastModified: file.lastModified,
-      };
-
       try {
-        const arrayBuffer = await file.arrayBuffer();
-        await Promise.all([
-          saveAudioFile(record),
-          saveFileData(id, arrayBuffer),
-        ]);
-        setAudioFiles((prev) => [...prev, record]);
+        const analysis = await analyzeAudioForUpload(file);
+        const durationMs = analysis.durationMs || Math.round((await readMediaDuration(file)) * 1000);
+        if (durationMs <= 0) throw new Error('无法读取音频时长');
+        const upload = await uploadIntentMutation.mutateAsync({
+          audioId: id,
+          originalName: file.name,
+          mimeType: file.type || 'audio/wav',
+        });
+        const uploadResponse = await fetch(upload.uploadUrl, {
+          method: 'PUT',
+          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+          body: file,
+        });
+        if (!uploadResponse.ok) throw new Error(`文件上传失败（${uploadResponse.status}）`);
+        await completeUploadMutation.mutateAsync({
+          id,
+          originalName: file.name,
+          storageKey: upload.storageKey,
+          storageUrl: upload.storageUrl,
+          mimeType: file.type || 'audio/wav',
+          sizeBytes: file.size,
+          durationMs,
+          sampleRate: analysis.sampleRate,
+          bitDepth: analysis.bitDepth,
+          numChannels: analysis.numChannels,
+          waveformPeaks: analysis.waveformPeaks,
+          waveformBucketCount: analysis.waveformBucketCount,
+        });
+        await utils.audio.list.invalidate();
         toast.success(`已上传: ${file.name}`);
 
         // 记录第一个新上传的文件 id
         if (!firstNewId) {
           firstNewId = id;
         }
-      } catch (err) {
-        toast.error(`上传失败: ${file.name}`);
+      } catch (error) {
+        toast.error(`上传失败：${(error as Error).message || file.name}`);
       }
     }
 
@@ -346,16 +382,13 @@ export default function Home() {
     if (firstNewId && !selectedFileId) {
       setSelectedFileId(firstNewId);
     }
-  }, [selectedFileId]);
+  }, [completeUploadMutation, selectedFileId, uploadIntentMutation, utils.audio.list]);
 
   // ---- 删除文件 ----
   const handleDeleteFile = useCallback(async (fileId: string) => {
     try {
-      await Promise.all([
-        deleteAudioFile(fileId),
-        deleteSegments(fileId),
-      ]);
-      setAudioFiles((prev) => prev.filter((f) => f.id !== fileId));
+      await deleteAudioMutation.mutateAsync({ audioFileId: fileId });
+      await utils.audio.list.invalidate();
       if (selectedFileId === fileId) {
         setSelectedFileId(null);
         setAudioUrl(null);
@@ -365,29 +398,41 @@ export default function Home() {
         setSegments([]);
         setMarkedStart(null);
         setMarkedEnd(null);
-        if (objectUrlRef.current) {
-          URL.revokeObjectURL(objectUrlRef.current);
-          objectUrlRef.current = null;
-        }
       }
       toast.success('文件已删除');
     } catch (err) {
       toast.error('删除失败');
     }
     setDeleteConfirmId(null);
-  }, [selectedFileId]);
+  }, [deleteAudioMutation, selectedFileId, utils.audio.list]);
 
   // ---- 实时保存片段（防抖 500ms）----
   const debouncedSaveSegments = useCallback((fileId: string, segs: AudioSegment[]) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(async () => {
       try {
-        await saveSegments(fileId, segs);
+        // 先写浏览器缓存；网络失败时用户本机仍可恢复未同步的片段。
+        await saveCachedSegments(fileId, segs);
+        await replaceSegmentsMutation.mutateAsync({
+          audioFileId: fileId,
+          segments: segs.map((segment, sortOrder) => ({
+            id: segment.id,
+            startMs: Math.round(segment.startTime * 1000),
+            endMs: Math.round(segment.endTime * 1000),
+            label: segment.label || null,
+            source: segment.source || 'manual',
+            isConfirmed: Boolean(segment.isConfirmed),
+            color: segment.color || null,
+            sortOrder,
+          })),
+        });
+        await utils.segments.list.invalidate({ audioFileId: fileId });
       } catch (err) {
         console.error('保存片段失败:', err);
+        toast.error('片段保存失败，请检查网络后重试');
       }
     }, 500);
-  }, []);
+  }, [replaceSegmentsMutation, utils.segments.list]);
 
   // ---- 标记开始 ----
   const handleMarkStart = useCallback((time: number) => {
@@ -483,26 +528,39 @@ export default function Home() {
   const handleSettingsChange = useCallback(async (newSettings: AppSettings) => {
     setSettings(newSettings);
     try {
-      await saveSettings(newSettings);
+      await saveCachedSettings(newSettings);
+      await saveSettingsMutation.mutateAsync({
+        silencePrefixMs: newSettings.silencePrefixMs,
+        silenceSuffixMs: newSettings.silenceSuffixMs,
+        vadEnergyThreshold: newSettings.vadEnergyThreshold,
+        vadMaxSilenceDurationMs: Math.round(newSettings.vadMaxSilenceDuration * 1000),
+        vadMinSpeechDurationMs: Math.round(newSettings.vadMinSpeechDuration * 1000),
+      });
+      await utils.settings.get.invalidate();
     } catch (err) {
       console.error('保存设置失败:', err);
+      toast.error('设置保存失败，请检查网络后重试');
     }
-  }, []);
+  }, [saveSettingsMutation, utils.settings.get]);
 
   // ---- VAD 检测 ----
   const handleRunVAD = useCallback(async () => {
-    if (!selectedFileId || !audioBuffer) {
+    if (!selectedFileId) {
       toast.error('请先选择音频文件');
       return;
     }
     setIsRunningVAD(true);
     try {
+      const raw = await ensureRawAudioData();
+      if (!raw) return;
+      const buffer = audioBuffer || await decodeAudioForVAD(raw);
+      setAudioBuffer(buffer);
       const prefixSec = settings.silencePrefixMs / 1000;
       const suffixSec = settings.silenceSuffixMs / 1000;
 
       // 直接使用已解码的 AudioBuffer 进行 VAD 检测
       const { detectVoiceSegments } = await import('@/lib/vad');
-      const vadSegments = await detectVoiceSegments(audioBuffer, {
+      const vadSegments = await detectVoiceSegments(buffer, {
         energyThreshold: settings.vadEnergyThreshold,
         maxSilenceDuration: settings.vadMaxSilenceDuration,
         minSpeechDuration: settings.vadMinSpeechDuration,
@@ -534,27 +592,29 @@ export default function Home() {
     } finally {
       setIsRunningVAD(false);
     }
-  }, [selectedFileId, audioBuffer, settings, segments, selectedFile, debouncedSaveSegments]);
+  }, [selectedFileId, audioBuffer, ensureRawAudioData, settings, segments, debouncedSaveSegments]);
 
   // ---- 清空所有片段 ----
   const handleClearSegments = useCallback(async () => {
     setSegments([]);
     setSelectedSegmentId(null);
     if (selectedFileId) {
-      await saveSegments(selectedFileId, []);
+      debouncedSaveSegments(selectedFileId, []);
     }
     toast.success('已清空所有片段');
-  }, [selectedFileId]);
+  }, [debouncedSaveSegments, selectedFileId]);
 
   // ---- 批量导出 ----
   const handleExportZip = useCallback(async () => {
-    if ((!rawArrayBuffer && !audioBuffer) || segments.length === 0) return;
+    if (segments.length === 0) return;
     setIsExporting(true);
     try {
+      const raw = await ensureRawAudioData();
+      if (!raw) return;
       const baseName = (selectedFile?.name || 'audio').replace(/\.[^/.]+$/, '');
       await downloadSegmentsAsZip(
-        rawArrayBuffer || new ArrayBuffer(0),
-        wavInfo,
+        raw,
+        parseWavHeader(raw),
         segments,
         `${baseName}_segments.zip`,
         audioBuffer || undefined,
@@ -566,7 +626,7 @@ export default function Home() {
     } finally {
       setIsExporting(false);
     }
-  }, [rawArrayBuffer, wavInfo, audioBuffer, segments, selectedFile]);
+  }, [ensureRawAudioData, audioBuffer, segments, selectedFile]);
 
   const handleExportCSV = useCallback(() => {
     if (segments.length === 0) return;
@@ -715,7 +775,7 @@ export default function Home() {
                     size="sm"
                     variant="outline"
                     onClick={handleRunVAD}
-                    disabled={isRunningVAD || (!audioBuffer && !rawArrayBuffer)}
+                    disabled={isRunningVAD}
                     className="h-8 gap-1.5 text-xs"
                   >
                     {isRunningVAD ? (
@@ -732,7 +792,7 @@ export default function Home() {
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={segments.length === 0 || isExporting || (!rawArrayBuffer && !audioBuffer)}
+                        disabled={segments.length === 0 || isExporting}
                         className="h-8 gap-1.5 text-xs"
                       >
                         {isExporting ? (
@@ -785,6 +845,8 @@ export default function Home() {
                     ref={waveformRef}
                     audioUrl={audioUrl}
                     audioFile={null}
+                    waveformPeaks={selectedFile.waveformPeaks}
+                    waveformDuration={selectedFile.durationMs / 1000}
                     segments={segments}
                     silencePrefixMs={settings.silencePrefixMs}
                     silenceSuffixMs={settings.silenceSuffixMs}

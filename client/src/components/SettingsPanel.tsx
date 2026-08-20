@@ -9,7 +9,7 @@ import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { AppSettings } from '@/lib/storage';
+import { AppSettings } from '@/lib/persistenceTypes';
 
 interface SettingsPanelProps {
   settings: AppSettings;
@@ -172,4 +172,3 @@ export default function SettingsPanel({ settings, onChange }: SettingsPanelProps
     </div>
   );
 }
-
