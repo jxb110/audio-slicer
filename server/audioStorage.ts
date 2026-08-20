@@ -1,3 +1,4 @@
+import { storagePut } from "./storage";
 import { ENV } from "./_core/env";
 
 function sanitizeFileName(name: string): string {
@@ -39,4 +40,20 @@ export async function createAudioUploadIntent(input: {
     storageKey,
     storageUrl: `/manus-storage/${storageKey}`,
   };
+}
+
+/**
+ * 同源上传代理使用的持久化入口。浏览器只向应用域名上传，避免对象存储桶CORS策略
+ * 阻断预签名PUT；服务端再通过已配置凭据写入对象存储。
+ */
+export async function storeAudioUpload(input: {
+  userId: number;
+  audioId: string;
+  fileName: string;
+  contentType: string;
+  data: Buffer;
+}): Promise<{ storageKey: string; storageUrl: string }> {
+  const relKey = `audio-slicer/users/${input.userId}/${input.audioId}/${sanitizeFileName(input.fileName)}`;
+  const { key, url } = await storagePut(relKey, input.data, input.contentType || "application/octet-stream");
+  return { storageKey: key, storageUrl: url };
 }

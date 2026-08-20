@@ -5,12 +5,22 @@ import { Route, Switch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
+import AdminConsole from "./pages/AdminConsole";
+import LocalLogin from "./pages/LocalLogin";
+import { useAuth } from "./_core/hooks/useAuth";
+
+function AuthenticatedHome() {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center font-mono text-sm">正在恢复本地会话...</div>;
+  if (!user) return <LocalLogin />;
+  return user.role === "admin" ? <AdminConsole /> : <Home />;
+}
 
 function Router() {
   // make sure to consider if you need authentication for certain routes
   return (
     <Switch>
-      <Route path={"/"} component={Home} />
+      <Route path={"/"} component={AuthenticatedHome} />
       <Route path={"/404"} component={NotFound} />
       {/* Final fallback route */}
       <Route component={NotFound} />

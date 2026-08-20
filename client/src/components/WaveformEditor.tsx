@@ -63,6 +63,23 @@ const SEGMENT_BORDER_COLORS = [
   'rgba(249, 115, 22, 0.8)',
 ];
 
+// 长音频可在较大总宽度下缩放；覆盖层会被拆为多个小Canvas，避免单个Canvas触及尺寸上限。
+const MAX_WAVEFORM_RENDER_WIDTH = 128_000;
+const OVERLAY_TILE_WIDTH = 16_384;
+
+function getBasePxPerSecond(duration?: number | null): number {
+  const preferred = duration && duration >= 30 * 60 ? 12 : 100;
+  return duration && duration > 0
+    ? Math.min(preferred, MAX_WAVEFORM_RENDER_WIDTH / duration)
+    : preferred;
+}
+
+function getMaxZoom(duration?: number | null): number {
+  const base = getBasePxPerSecond(duration);
+  if (!duration || duration <= 0) return 20;
+  return Math.max(0.5, Math.min(20, MAX_WAVEFORM_RENDER_WIDTH / (duration * base)));
+}
+
 export function getSegmentColor(index: number) {
   return {
     bg: SEGMENT_COLORS[index % SEGMENT_COLORS.length],
@@ -77,8 +94,8 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     onConfirm, markedStart, markedEnd,
   }, ref) => {
     const containerRef = useRef<HTMLDivElement>(null);
-    // overlay canvas 将被动态插入 Shadow DOM，不再用 React ref 挂载
-    const overlayCanvasRef = useRef<HTMLCanvasElement | null>(null);
+    // 覆盖层会动态插入WaveSurfer Shadow DOM，并按宽度分块绘制。
+    const overlayLayerRef = useRef<HTMLDivElement | null>(null);
     const wavesurferRef = useRef<WaveSurfer | null>(null);
 
     const [isPlaying, setIsPlaying] = useState(false);
@@ -133,106 +150,86 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     }));
 
     // ---- 绘制 overlay ----
-    // canvas 已在 wrapper 内，宽度 = wrapper.clientWidth（即波形总宽度）
-    // 高度 = wrapper.clientHeight，坐标直接用 timeToX 映射，无需任何偏移
+    // 覆盖层位于wrapper内，分块Canvas随波形一起滚动；每块均以全局时间坐标绘制。
     const drawOverlay = useCallback(() => {
-      const canvas = overlayCanvasRef.current;
-      if (!canvas || durationRef.current === 0) return;
+      const layer = overlayLayerRef.current;
+      if (!layer || durationRef.current === 0) return;
 
-      const wrapper = canvas.parentElement;
+      const wrapper = layer.parentElement;
       if (!wrapper) return;
 
       const totalWidth = wrapper.clientWidth;
       const totalHeight = wrapper.clientHeight;
       if (totalWidth === 0 || totalHeight === 0) return;
 
-      canvas.width = totalWidth;
-      canvas.height = totalHeight;
-
-      const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-      ctx.clearRect(0, 0, totalWidth, totalHeight);
-
       const dur = durationRef.current;
       const timeToX = (t: number) => (t / dur) * totalWidth;
+      layer.replaceChildren();
+      layer.style.width = `${totalWidth}px`;
+      layer.style.height = `${totalHeight}px`;
 
-      // 绘制已保存的片段
-      segmentsRef.current.forEach((seg, idx) => {
-        const x1 = timeToX(seg.startTime);
-        const x2 = timeToX(seg.endTime);
-        const colors = getSegmentColor(idx);
-        const isSelected = seg.id === selectedSegmentIdRef.current;
+      const drawScene = (ctx: CanvasRenderingContext2D) => {
+        segmentsRef.current.forEach((seg, idx) => {
+          const x1 = timeToX(seg.startTime);
+          const x2 = timeToX(seg.endTime);
+          const colors = getSegmentColor(idx);
+          const isSelected = seg.id === selectedSegmentIdRef.current;
+          ctx.fillStyle = isSelected ? colors.bg.replace('0.25', '0.45') : colors.bg;
+          ctx.fillRect(x1, 0, x2 - x1, totalHeight);
+          ctx.strokeStyle = colors.border;
+          ctx.lineWidth = isSelected ? 2.5 : 1.5;
+          ctx.strokeRect(x1, 0, x2 - x1, totalHeight);
+          ctx.fillStyle = colors.border.replace('0.8', '1');
+          ctx.font = 'bold 11px JetBrains Mono, monospace';
+          ctx.fillText(`${idx + 1}`, x1 + 4, 15);
+        });
 
-        ctx.fillStyle = isSelected ? colors.bg.replace('0.25', '0.45') : colors.bg;
-        ctx.fillRect(x1, 0, x2 - x1, totalHeight);
-        ctx.strokeStyle = colors.border;
-        ctx.lineWidth = isSelected ? 2.5 : 1.5;
-        ctx.strokeRect(x1, 0, x2 - x1, totalHeight);
-        ctx.fillStyle = colors.border.replace('0.8', '1');
-        ctx.font = 'bold 11px JetBrains Mono, monospace';
-        ctx.fillText(`${idx + 1}`, x1 + 4, 15);
-      });
-
-      // 绘制当前标记区域（含首尾静音）
-      const prefixSec = silencePrefixRef.current / 1000;
-      const suffixSec = silenceSuffixRef.current / 1000;
-
-      if (markedStartRef.current !== null) {
+        const prefixSec = silencePrefixRef.current / 1000;
+        const suffixSec = silenceSuffixRef.current / 1000;
+        if (markedStartRef.current === null) return;
         const rawStart = markedStartRef.current;
         const startWithSilence = Math.max(0, rawStart - prefixSec);
-        const endWithSilence = markedEndRef.current !== null
-          ? Math.min(dur, markedEndRef.current + suffixSec) : null;
-
-        // 前置静音区域
+        const endWithSilence = markedEndRef.current !== null ? Math.min(dur, markedEndRef.current + suffixSec) : null;
         if (prefixSec > 0) {
           const sx1 = timeToX(startWithSilence);
           const sx2 = timeToX(rawStart);
           ctx.fillStyle = 'rgba(99, 102, 241, 0.18)';
           ctx.fillRect(sx1, 0, sx2 - sx1, totalHeight);
-          ctx.setLineDash([4, 3]);
-          ctx.strokeStyle = 'rgba(99, 102, 241, 0.7)';
-          ctx.lineWidth = 1.5;
-          ctx.beginPath(); ctx.moveTo(sx1, 0); ctx.lineTo(sx1, totalHeight); ctx.stroke();
-          ctx.setLineDash([]);
+          ctx.setLineDash([4, 3]); ctx.strokeStyle = 'rgba(99, 102, 241, 0.7)'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(sx1, 0); ctx.lineTo(sx1, totalHeight); ctx.stroke(); ctx.setLineDash([]);
         }
-
-        // IN 标记线
         const sx = timeToX(rawStart);
-        ctx.strokeStyle = '#4F46E5';
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#4F46E5'; ctx.lineWidth = 2;
         ctx.beginPath(); ctx.moveTo(sx, 0); ctx.lineTo(sx, totalHeight); ctx.stroke();
-        ctx.fillStyle = '#4F46E5';
-        ctx.font = 'bold 11px JetBrains Mono, monospace';
-        ctx.fillText('IN', sx + 3, totalHeight - 5);
-
-        if (markedEndRef.current !== null && endWithSilence !== null) {
-          const rawEnd = markedEndRef.current;
-          const ex = timeToX(rawEnd);
-
-          // 选中区域
-          ctx.fillStyle = 'rgba(99, 102, 241, 0.12)';
-          ctx.fillRect(sx, 0, ex - sx, totalHeight);
-
-          // OUT 标记线
-          ctx.strokeStyle = '#7C3AED';
-          ctx.lineWidth = 2;
-          ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, totalHeight); ctx.stroke();
-          ctx.fillStyle = '#7C3AED';
-          ctx.font = 'bold 11px JetBrains Mono, monospace';
-          ctx.fillText('OUT', ex + 3, totalHeight - 5);
-
-          // 后置静音区域
-          if (suffixSec > 0) {
-            const ex2 = timeToX(endWithSilence);
-            ctx.fillStyle = 'rgba(124, 58, 237, 0.18)';
-            ctx.fillRect(ex, 0, ex2 - ex, totalHeight);
-            ctx.setLineDash([4, 3]);
-            ctx.strokeStyle = 'rgba(124, 58, 237, 0.7)';
-            ctx.lineWidth = 1.5;
-            ctx.beginPath(); ctx.moveTo(ex2, 0); ctx.lineTo(ex2, totalHeight); ctx.stroke();
-            ctx.setLineDash([]);
-          }
+        ctx.fillStyle = '#4F46E5'; ctx.font = 'bold 11px JetBrains Mono, monospace'; ctx.fillText('IN', sx + 3, totalHeight - 5);
+        if (markedEndRef.current === null || endWithSilence === null) return;
+        const rawEnd = markedEndRef.current;
+        const ex = timeToX(rawEnd);
+        ctx.fillStyle = 'rgba(99, 102, 241, 0.12)'; ctx.fillRect(sx, 0, ex - sx, totalHeight);
+        ctx.strokeStyle = '#7C3AED'; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(ex, 0); ctx.lineTo(ex, totalHeight); ctx.stroke();
+        ctx.fillStyle = '#7C3AED'; ctx.font = 'bold 11px JetBrains Mono, monospace'; ctx.fillText('OUT', ex + 3, totalHeight - 5);
+        if (suffixSec > 0) {
+          const ex2 = timeToX(endWithSilence);
+          ctx.fillStyle = 'rgba(124, 58, 237, 0.18)'; ctx.fillRect(ex, 0, ex2 - ex, totalHeight);
+          ctx.setLineDash([4, 3]); ctx.strokeStyle = 'rgba(124, 58, 237, 0.7)'; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(ex2, 0); ctx.lineTo(ex2, totalHeight); ctx.stroke(); ctx.setLineDash([]);
         }
+      };
+
+      for (let offset = 0; offset < totalWidth; offset += OVERLAY_TILE_WIDTH) {
+        const tileWidth = Math.min(OVERLAY_TILE_WIDTH, totalWidth - offset);
+        const tile = document.createElement('canvas');
+        tile.width = tileWidth;
+        tile.height = totalHeight;
+        tile.style.cssText = `position:absolute;top:0;left:${offset}px;width:${tileWidth}px;height:${totalHeight}px;pointer-events:none;`;
+        layer.appendChild(tile);
+        const ctx = tile.getContext('2d');
+        if (!ctx) continue;
+        ctx.save();
+        ctx.translate(-offset, 0);
+        drawScene(ctx);
+        ctx.restore();
       }
     }, []);
 
@@ -240,9 +237,8 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     useEffect(() => {
       if (!containerRef.current) return;
 
-      // 长音频即使使用预计算峰值，过高的初始像素密度也会生成超宽画布。
-      // 初始以概览模式加载，用户仍可通过缩放控件查看局部细节。
-      const initialPxPerSecond = waveformDuration && waveformDuration >= 30 * 60 ? 12 : 100;
+      // 长音频以概览模式加载，并始终受最大画布宽度保护。
+      const initialPxPerSecond = getBasePxPerSecond(waveformDuration);
 
       const ws = WaveSurfer.create({
         container: containerRef.current,
@@ -274,27 +270,16 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         setIsReady(true);
         onReady?.(dur);
 
-        // 将 overlay canvas 插入 Shadow DOM 的 wrapper 元素
-        // wrapper 的宽度 = 波形总宽度，canvas 随波形一起滚动，无需任何偏移
+        // 将分块覆盖层插入Shadow DOM的wrapper，随波形一起滚动。
         const wrapper = ws.getWrapper();
         if (wrapper) {
-          // 移除旧 canvas（如果有）
-          const old = wrapper.querySelector('.overlay-canvas');
+          const old = wrapper.querySelector('.overlay-layer');
           if (old) old.remove();
-
-          const canvas = document.createElement('canvas');
-          canvas.className = 'overlay-canvas';
-          canvas.style.cssText = `
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            pointer-events: none;
-            z-index: 10;
-          `;
-          wrapper.appendChild(canvas);
-          overlayCanvasRef.current = canvas;
+          const layer = document.createElement('div');
+          layer.className = 'overlay-layer';
+          layer.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:10;';
+          wrapper.appendChild(layer);
+          overlayLayerRef.current = layer;
           setTimeout(drawOverlay, 100);
         }
       });
@@ -321,7 +306,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       return () => {
         try { ws.unAll(); ws.destroy(); } catch (_) { /* AbortError 正常忽略 */ }
         if (playRangeTimerRef.current) clearTimeout(playRangeTimerRef.current);
-        overlayCanvasRef.current = null;
+        overlayLayerRef.current = null;
         wavesurferRef.current = null;
         setIsReady(false); setIsPlaying(false); setCurrentTime(0); setDuration(0);
         durationRef.current = 0; playRangeEndRef.current = null;
@@ -437,11 +422,17 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     // 缩放
     useEffect(() => {
       if (wavesurferRef.current && isReady) {
-        wavesurferRef.current.zoom(zoom * 100);
+        wavesurferRef.current.zoom(zoom * getBasePxPerSecond(waveformDuration));
         // 等待 WaveSurfer 重绘完成后再重绘 overlay（wrapper 宽度已变化）
         setTimeout(drawOverlay, 200);
       }
-    }, [zoom, isReady, drawOverlay]);
+    }, [zoom, isReady, waveformDuration, drawOverlay]);
+
+    const maxZoom = getMaxZoom(waveformDuration);
+
+    useEffect(() => {
+      setZoom((current) => Math.min(current, maxZoom));
+    }, [maxZoom]);
 
     // 音量
     useEffect(() => {
@@ -562,8 +553,9 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
             </Button>
             <span className="text-xs text-slate-500 w-10 text-center font-mono">{zoom.toFixed(1)}x</span>
             <Button size="sm" variant="ghost"
-              onClick={() => setZoom((z) => Math.min(20, z + 0.5))}
-              className="h-7 w-7 p-0" title="放大">
+              onClick={() => setZoom((z) => Math.min(maxZoom, z + 0.5))}
+              disabled={zoom >= maxZoom}
+              className="h-7 w-7 p-0" title={zoom >= maxZoom ? '为保持长音频渲染稳定，已达到最大缩放' : '放大'}>
               <ZoomIn className="w-3.5 h-3.5" />
             </Button>
           </div>

@@ -12,7 +12,18 @@
 | 音频元数据与波形峰值 | `audioFiles` | 文件列表、长音频概览波形、源格式参数 |
 | 切分片段 | `audioSegments` | 实时保存 IN/OUT 结果、标签、来源及排序 |
 | 全局切音/VAD设置 | `userSlicerSettings` | 首尾静音、能量阈值、最小时长等 |
-| 用户身份 | `users` | 多用户数据隔离 |
+| 用户身份 | `users` | 本地账号密码、管理员与worker作业隔离 |
+
+## 账号与权限
+
+应用使用**本地账号密码**，不依赖第三方OAuth。首次访问会初始化管理员账号：
+
+| 角色 | 默认账号 | 默认密码 | 权限 |
+|---|---|---|---|
+| 管理员 | `admin` | `admin` | 创建/修改/停用worker、重置worker密码、查看全部worker作业与按账号筛选结果 |
+| worker | 由管理员分配 | 由管理员分配 | 登录后直接切音作业；仅可访问自己名下的音频、片段和设置 |
+
+> 首次登录后应立即在管理员控制台修改 `admin` 密码。管理员修改worker登录名后，旧登录名会立即失效，但该worker已有的音频和片段不会丢失。
 
 ## 本地开发
 
@@ -28,7 +39,7 @@ pnpm drizzle-kit migrate
 pnpm dev
 ```
 
-本地服务默认监听 `http://localhost:3000`。首次启动前，请在 `.env` 中配置数据库、OAuth 和对象存储相关变量；不要将真实密钥提交到 Git。
+本地服务启动后会在终端输出访问地址。首次启动前，请配置数据库和对象存储相关变量；不要将真实密钥提交到 Git。
 
 ## 环境变量
 
@@ -36,9 +47,7 @@ pnpm dev
 |---|---|---|
 | `DATABASE_URL` | 是 | MySQL/TiDB 数据库连接串 |
 | `JWT_SECRET` | 是 | 会话签名密钥 |
-| `VITE_APP_ID` / `OAUTH_SERVER_URL` / `VITE_OAUTH_PORTAL_URL` | 是 | OAuth 登录配置 |
-| `BUILT_IN_FORGE_API_URL` / `BUILT_IN_FORGE_API_KEY` | 是 | 音频对象存储预签名上传与下载代理 |
-| `OWNER_OPEN_ID` / `OWNER_NAME` | 推荐 | 应用拥有者与管理员初始化 |
+| `BUILT_IN_FORGE_API_URL` / `BUILT_IN_FORGE_API_KEY` | 是 | 经服务端鉴权的音频对象存储上传与下载代理 |
 | `VITE_ANALYTICS_ENDPOINT` / `VITE_ANALYTICS_WEBSITE_ID` | 可选 | 访问分析 |
 
 ## 数据库迁移
@@ -50,15 +59,11 @@ pnpm drizzle-kit generate
 pnpm drizzle-kit migrate
 ```
 
-音频二进制文件不写入数据库。应用会将文件上传至对象存储，并仅把 `storageKey`、`storageUrl`、格式参数、时长和波形峰值保存到数据库。
+音频二进制文件不写入数据库。浏览器先向同源的 `/api/audio/upload/:audioId` 上传，服务器在确认登录身份后写入对象存储；这避免了浏览器直接 PUT 到对象存储预签名地址时可能遇到的跨域限制。数据库仅保存 `storageKey`、`storageUrl`、格式参数、时长和波形峰值。
 
 ## GitHub 与托管部署
 
-当前项目已经连接到 GitHub 远程仓库。保存检查点会同步项目源码并发布到已配置的托管环境。若在其他支持 Node.js、MySQL 和 S3 兼容存储的平台部署，应配置上述全部环境变量，并确保 OAuth 回调地址指向部署域名下的：
-
-```text
-/api/oauth/callback
-```
+当前项目已经连接到 GitHub 远程仓库。保存检查点会同步项目源码并发布到已配置的托管环境。若在其他支持 Node.js、MySQL 和 S3 兼容存储的平台部署，应配置上述必要环境变量，并让服务端能够访问数据库与对象存储。
 
 对象存储实现集中在 `server/audioStorage.ts` 与 `server/storage.ts`。如果目标环境不提供 Forge 兼容对象存储，可在这两个文件替换为该平台的 S3 预签名上传实现，同时保留数据库的 `storageKey` 与 `storageUrl` 字段。
 

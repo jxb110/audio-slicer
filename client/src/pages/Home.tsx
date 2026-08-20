@@ -30,6 +30,8 @@ import {
   Scissors,
   X,
   Music,
+  LogOut,
+  UserRound,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -61,6 +63,7 @@ import SegmentEditDialog from '@/components/SegmentEditDialog';
 import SettingsPanel from '@/components/SettingsPanel';
 import { AudioSegment, parseWavHeader, WavInfo, decodeAudioForVAD, downloadSegmentsAsZip, exportSegmentsAsCSV } from '@/lib/audioExport';
 import { trpc } from '@/lib/trpc';
+import { useAuth } from '@/_core/hooks/useAuth';
 import { analyzeAudioForUpload } from '@/lib/longAudio';
 import { AppSettings, AudioFileRecord, DEFAULT_SETTINGS } from '@/lib/persistenceTypes';
 import {
@@ -151,11 +154,11 @@ function EmptyWaveformPreview() {
 }
 
 export default function Home() {
+  const { user, logout } = useAuth();
   // ---- 文件状态 ----
   const utils = trpc.useUtils();
   const audioFilesQuery = trpc.audio.list.useQuery(undefined, { retry: false });
   const settingsQuery = trpc.settings.get.useQuery(undefined, { retry: false });
-  const uploadIntentMutation = trpc.audio.createUploadIntent.useMutation();
   const completeUploadMutation = trpc.audio.completeUpload.useMutation();
   const deleteAudioMutation = trpc.audio.delete.useMutation();
   const replaceSegmentsMutation = trpc.segments.replaceAll.useMutation();
@@ -231,6 +234,15 @@ export default function Home() {
       loadCachedSettings().then(setSettings).catch(() => undefined);
     }
   }, [settingsQuery.data, settingsQuery.error]);
+
+  // 刷新后恢复文件列表中的当前工作对象；若原选中项已删除，则回退到最新文件。
+  useEffect(() => {
+    if (audioFiles.length === 0) return;
+    const currentStillExists = selectedFileId && audioFiles.some((file) => file.id === selectedFileId);
+    if (!currentStillExists) {
+      setSelectedFileId(audioFiles[0].id);
+    }
+  }, [audioFiles, selectedFileId]);
 
   useEffect(() => {
     if (!selectedFileId) {
@@ -340,17 +352,16 @@ export default function Home() {
         const analysis = await analyzeAudioForUpload(file);
         const durationMs = analysis.durationMs || Math.round((await readMediaDuration(file)) * 1000);
         if (durationMs <= 0) throw new Error('无法读取音频时长');
-        const upload = await uploadIntentMutation.mutateAsync({
-          audioId: id,
-          originalName: file.name,
-          mimeType: file.type || 'audio/wav',
-        });
-        const uploadResponse = await fetch(upload.uploadUrl, {
-          method: 'PUT',
-          headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        const uploadResponse = await fetch(`/api/audio/upload/${id}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': file.type || 'application/octet-stream',
+            'x-audio-file-name': encodeURIComponent(file.name),
+          },
           body: file,
         });
         if (!uploadResponse.ok) throw new Error(`文件上传失败（${uploadResponse.status}）`);
+        const upload = await uploadResponse.json() as { storageKey: string; storageUrl: string };
         await completeUploadMutation.mutateAsync({
           id,
           originalName: file.name,
@@ -382,7 +393,7 @@ export default function Home() {
     if (firstNewId && !selectedFileId) {
       setSelectedFileId(firstNewId);
     }
-  }, [completeUploadMutation, selectedFileId, uploadIntentMutation, utils.audio.list]);
+  }, [completeUploadMutation, selectedFileId, utils.audio.list]);
 
   // ---- 删除文件 ----
   const handleDeleteFile = useCallback(async (fileId: string) => {
@@ -659,6 +670,11 @@ export default function Home() {
 
         <div className="flex-1" />
 
+        <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono text-slate-500">
+          <UserRound className="w-3.5 h-3.5" />
+          <span>{user?.username || 'worker'}</span>
+        </div>
+
         {/* 设置按钮 */}
         <Popover open={showSettings} onOpenChange={setShowSettings}>
           <PopoverTrigger asChild>
@@ -671,6 +687,10 @@ export default function Home() {
             <SettingsPanel settings={settings} onChange={handleSettingsChange} />
           </PopoverContent>
         </Popover>
+        <Button size="sm" variant="ghost" onClick={() => logout()} className="h-8 gap-1.5 text-xs text-slate-500" title="退出当前账号">
+          <LogOut className="w-3.5 h-3.5" />
+          退出
+        </Button>
       </header>
 
       <div className="flex-1 flex overflow-hidden">

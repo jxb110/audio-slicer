@@ -25,6 +25,12 @@ export const users = mysqlTable("users", {
   id: int("id").autoincrement().primaryKey(),
   /** Manus OAuth identifier (openId) returned from the OAuth callback. Unique per user. */
   openId: varchar("openId", { length: 64 }).notNull().unique(),
+  /** 本地账号登录名；OAuth历史用户可为空。 */
+  username: varchar("username", { length: 64 }).unique(),
+  /** bcrypt密码哈希，仅本地账号使用，绝不向客户端返回。 */
+  passwordHash: varchar("passwordHash", { length: 255 }),
+  /** 管理员可停用worker账号，已停用账号无法建立新会话。 */
+  isActive: boolean("isActive").default(true).notNull(),
   name: text("name"),
   email: varchar("email", { length: 320 }),
   loginMethod: varchar("loginMethod", { length: 64 }),

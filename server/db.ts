@@ -1,4 +1,5 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import bcrypt from "bcryptjs";
+import { and, asc, count, desc, eq, inArray, max } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/mysql2";
 import {
   audioFiles,
@@ -94,6 +95,143 @@ export async function getUserByOpenId(openId: string) {
   const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
 
   return result.length > 0 ? result[0] : undefined;
+}
+
+const DEFAULT_ADMIN_USERNAME = "admin";
+const DEFAULT_ADMIN_PASSWORD = "admin";
+
+function normalizeUsername(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export async function ensureDefaultAdmin() {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const existing = await db.select().from(users).where(eq(users.username, DEFAULT_ADMIN_USERNAME)).limit(1);
+  if (existing[0]) return existing[0];
+  const passwordHash = await bcrypt.hash(DEFAULT_ADMIN_PASSWORD, 12);
+  await db.insert(users).values({
+    openId: `local:${DEFAULT_ADMIN_USERNAME}`,
+    username: DEFAULT_ADMIN_USERNAME,
+    passwordHash,
+    name: "管理员",
+    loginMethod: "local",
+    role: "admin",
+    isActive: true,
+    lastSignedIn: new Date(),
+  });
+  const created = await db.select().from(users).where(eq(users.username, DEFAULT_ADMIN_USERNAME)).limit(1);
+  if (!created[0]) throw new Error("管理员账号初始化失败");
+  return created[0];
+}
+
+export async function getLocalUserByUsername(username: string) {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const result = await db.select().from(users).where(eq(users.username, normalizeUsername(username))).limit(1);
+  return result[0];
+}
+
+export async function getLocalUserByOpenId(openId: string) {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  return result[0];
+}
+
+export async function verifyLocalCredentials(username: string, password: string) {
+  await ensureDefaultAdmin();
+  const user = await getLocalUserByUsername(username);
+  if (!user || user.loginMethod !== "local" || !user.passwordHash || !user.isActive) return undefined;
+  if (!(await bcrypt.compare(password, user.passwordHash))) return undefined;
+  const db = await getDb();
+  await db?.update(users).set({ lastSignedIn: new Date() }).where(eq(users.id, user.id));
+  return user;
+}
+
+export async function changeLocalPassword(userId: number, currentPassword: string, newPassword: string) {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const user = (await db.select().from(users).where(eq(users.id, userId)).limit(1))[0];
+  if (!user?.passwordHash || user.loginMethod !== "local") return false;
+  if (!(await bcrypt.compare(currentPassword, user.passwordHash))) return false;
+  await db.update(users).set({ passwordHash: await bcrypt.hash(newPassword, 12) }).where(eq(users.id, userId));
+  return true;
+}
+
+export async function createWorkerAccount(input: { username: string; displayName?: string | null; password: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const username = normalizeUsername(input.username);
+  if (await getLocalUserByUsername(username)) throw new Error("该登录账号已存在");
+  await db.insert(users).values({
+    openId: `local:${username}`,
+    username,
+    passwordHash: await bcrypt.hash(input.password, 12),
+    name: input.displayName?.trim() || username,
+    loginMethod: "local",
+    role: "user",
+    isActive: true,
+    lastSignedIn: new Date(),
+  });
+  const created = await getLocalUserByUsername(username);
+  if (!created) throw new Error("worker账号创建失败");
+  return created;
+}
+
+export async function listLocalAccounts() {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  return db.select({
+    id: users.id,
+    username: users.username,
+    name: users.name,
+    email: users.email,
+    role: users.role,
+    isActive: users.isActive,
+    createdAt: users.createdAt,
+    updatedAt: users.updatedAt,
+    lastSignedIn: users.lastSignedIn,
+  }).from(users).where(eq(users.loginMethod, "local")).orderBy(asc(users.role), asc(users.username));
+}
+
+export async function updateWorkerAccount(input: { userId: number; username?: string; displayName?: string | null; isActive?: boolean; password?: string }) {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const user = (await db.select().from(users).where(eq(users.id, input.userId)).limit(1))[0];
+  if (!user || user.loginMethod !== "local" || user.role === "admin") throw new Error("worker账号不存在");
+  const values: Record<string, unknown> = {};
+  if (input.username !== undefined) {
+    const username = normalizeUsername(input.username);
+    const duplicate = await getLocalUserByUsername(username);
+    if (duplicate && duplicate.id !== user.id) throw new Error("该登录账号已存在");
+    values.username = username;
+    values.openId = `local:${username}`;
+  }
+  if (input.displayName !== undefined) values.name = input.displayName?.trim() || user.username;
+  if (input.isActive !== undefined) values.isActive = input.isActive;
+  if (input.password) values.passwordHash = await bcrypt.hash(input.password, 12);
+  if (Object.keys(values).length > 0) await db.update(users).set(values).where(eq(users.id, input.userId));
+  return (await db.select().from(users).where(eq(users.id, input.userId)).limit(1))[0];
+}
+
+export async function getAdminWorkOverview() {
+  const db = await getDb();
+  if (!db) throw new Error("数据库当前不可用");
+  const accounts = await listLocalAccounts();
+  const accountIds = accounts.map(account => account.id);
+  if (accountIds.length === 0) return { accounts: [], recentFiles: [] };
+  const [fileCounts, segmentCounts, recentFiles] = await Promise.all([
+    db.select({ userId: audioFiles.userId, count: count(audioFiles.id), latest: max(audioFiles.updatedAt) }).from(audioFiles).where(inArray(audioFiles.userId, accountIds)).groupBy(audioFiles.userId),
+    db.select({ userId: audioSegments.userId, count: count(audioSegments.id) }).from(audioSegments).where(inArray(audioSegments.userId, accountIds)).groupBy(audioSegments.userId),
+    db.select({ id: audioFiles.id, userId: audioFiles.userId, originalName: audioFiles.originalName, durationMs: audioFiles.durationMs, updatedAt: audioFiles.updatedAt, username: users.username, workerName: users.name }).from(audioFiles).leftJoin(users, eq(audioFiles.userId, users.id)).where(inArray(audioFiles.userId, accountIds)).orderBy(desc(audioFiles.updatedAt)).limit(100),
+  ]);
+  const fileMap = new Map(fileCounts.map(row => [row.userId, row]));
+  const segmentMap = new Map(segmentCounts.map(row => [row.userId, row.count]));
+  return {
+    accounts: accounts.map(account => ({ ...account, audioCount: Number(fileMap.get(account.id)?.count || 0), segmentCount: Number(segmentMap.get(account.id) || 0), latestWorkAt: fileMap.get(account.id)?.latest || null })),
+    recentFiles,
+  };
 }
 
 export async function listAudioFilesForUser(userId: number) {
