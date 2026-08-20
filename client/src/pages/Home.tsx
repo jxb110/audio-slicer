@@ -64,6 +64,7 @@ import SettingsPanel from '@/components/SettingsPanel';
 import { AudioSegment, parseWavHeader, WavInfo, decodeAudioForVAD, downloadSegmentsAsZip, exportSegmentsAsCSV } from '@/lib/audioExport';
 import { trpc } from '@/lib/trpc';
 import { useAuth } from '@/_core/hooks/useAuth';
+import { useLocation } from 'wouter';
 import { analyzeAudioForUpload } from '@/lib/longAudio';
 import { AppSettings, AudioFileRecord, DEFAULT_SETTINGS } from '@/lib/persistenceTypes';
 import {
@@ -153,12 +154,14 @@ function EmptyWaveformPreview() {
   );
 }
 
-export default function Home() {
+export default function Home({ workspaceUserId, readOnly = false }: { workspaceUserId?: number; readOnly?: boolean }) {
   const { user, logout } = useAuth();
+  const [, setLocation] = useLocation();
   // ---- 文件状态 ----
   const utils = trpc.useUtils();
-  const audioFilesQuery = trpc.audio.list.useQuery(undefined, { retry: false });
-  const settingsQuery = trpc.settings.get.useQuery(undefined, { retry: false });
+  const workspaceQuery = useMemo(() => workspaceUserId ? { ownerUserId: workspaceUserId } : undefined, [workspaceUserId]);
+  const audioFilesQuery = trpc.audio.list.useQuery(workspaceQuery, { retry: false, refetchInterval: readOnly ? 3000 : false });
+  const settingsQuery = trpc.settings.get.useQuery(workspaceQuery, { retry: false });
   const completeUploadMutation = trpc.audio.completeUpload.useMutation();
   const deleteAudioMutation = trpc.audio.delete.useMutation();
   const replaceSegmentsMutation = trpc.segments.replaceAll.useMutation();
@@ -212,10 +215,12 @@ export default function Home() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 并发保护：记录当前正在加载的 fileId，避免多次触发
   const loadingFileIdRef = useRef<string | null>(null);
+  const selectedFileIdRef = useRef<string | null>(null);
+  useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
 
   const segmentsQuery = trpc.segments.list.useQuery(
-    { audioFileId: selectedFileId || '' },
-    { enabled: !!selectedFileId, retry: false },
+    { audioFileId: selectedFileId || '', ...(workspaceUserId ? { ownerUserId: workspaceUserId } : {}) },
+    { enabled: !!selectedFileId, retry: false, refetchInterval: readOnly ? 3000 : false },
   );
 
   // ---- 初始化：读取后端已持久化的设置与片段 ----
@@ -275,7 +280,8 @@ export default function Home() {
     if (rawArrayBuffer) return rawArrayBuffer;
     if (!selectedFile) return null;
     try {
-      const response = await fetch(selectedFile.storageUrl);
+      const query = workspaceUserId ? `?ownerUserId=${workspaceUserId}` : '';
+      const response = await fetch(`/api/audio/raw/${encodeURIComponent(selectedFile.id)}${query}`);
       if (!response.ok) throw new Error(`下载音频失败（${response.status}）`);
       const data = await response.arrayBuffer();
       setRawArrayBuffer(data);
@@ -285,7 +291,7 @@ export default function Home() {
       toast.error(`读取原始音频失败：${(error as Error).message}`);
       return null;
     }
-  }, [rawArrayBuffer, selectedFile]);
+  }, [rawArrayBuffer, selectedFile, workspaceUserId]);
 
   // ---- 加载音频文件 ----
   const loadAudioFile = useCallback(async (fileId: string) => {
@@ -306,7 +312,8 @@ export default function Home() {
       if (loadingFileIdRef.current !== fileId) return;
 
       // 波形使用持久化的峰值数组，加载时不再下载或解码完整长音频。
-      setAudioUrl(fileRecord.storageUrl);
+      const query = workspaceUserId ? `?ownerUserId=${workspaceUserId}` : '';
+      setAudioUrl(`/api/audio/raw/${encodeURIComponent(fileRecord.id)}${query}`);
       setAudioDuration(fileRecord.durationMs / 1000);
     } catch (error) {
       if (loadingFileIdRef.current === fileId) {
@@ -318,7 +325,7 @@ export default function Home() {
         setIsLoadingFile(false);
       }
     }
-  }, [audioFiles]);
+  }, [audioFiles, workspaceUserId]);
 
   // ---- 选择文件 ----
   const handleSelectFile = useCallback(async (fileId: string) => {
@@ -337,6 +344,10 @@ export default function Home() {
 
   // ---- 上传文件 ----
   const handleFileUpload = useCallback(async (files: FileList | null) => {
+    if (readOnly) {
+      toast.info('管理员查看模式下不能修改 worker 作业');
+      return;
+    }
     if (!files || files.length === 0) return;
 
     let firstNewId: string | null = null;
@@ -376,7 +387,6 @@ export default function Home() {
           waveformPeaks: analysis.waveformPeaks,
           waveformBucketCount: analysis.waveformBucketCount,
         });
-        await utils.audio.list.invalidate();
         toast.success(`已上传: ${file.name}`);
 
         // 记录第一个新上传的文件 id
@@ -388,15 +398,17 @@ export default function Home() {
       }
     }
 
+    await utils.audio.list.invalidate(workspaceQuery);
     // 上传完成后，如果没有选中文件，自动选中第一个新文件
     // setSelectedFileId 会触发 useEffect([selectedFileId]) 来加载，只触发一次
-    if (firstNewId && !selectedFileId) {
+    if (firstNewId && !selectedFileIdRef.current) {
       setSelectedFileId(firstNewId);
     }
-  }, [completeUploadMutation, selectedFileId, utils.audio.list]);
+  }, [completeUploadMutation, readOnly, utils.audio.list, workspaceQuery]);
 
   // ---- 删除文件 ----
   const handleDeleteFile = useCallback(async (fileId: string) => {
+    if (readOnly) return;
     try {
       await deleteAudioMutation.mutateAsync({ audioFileId: fileId });
       await utils.audio.list.invalidate();
@@ -415,7 +427,7 @@ export default function Home() {
       toast.error('删除失败');
     }
     setDeleteConfirmId(null);
-  }, [deleteAudioMutation, selectedFileId, utils.audio.list]);
+  }, [deleteAudioMutation, readOnly, selectedFileId, utils.audio.list]);
 
   // ---- 实时保存片段（防抖 500ms）----
   const debouncedSaveSegments = useCallback((fileId: string, segs: AudioSegment[]) => {
@@ -458,6 +470,7 @@ export default function Home() {
 
   // ---- 确认保存片段（空格键）----
   const handleConfirm = useCallback(() => {
+    if (readOnly) return;
     if (markedStart === null || markedEnd === null) {
       if (markedStart !== null) {
         toast.info('请先右键标记结束时间');
@@ -500,7 +513,7 @@ export default function Home() {
     setMarkedEnd(null);
 
     toast.success(`片段 ${newSegments.indexOf(newSegment) + 1} 已保存`);
-  }, [markedStart, markedEnd, segments, settings, audioDuration, selectedFileId, debouncedSaveSegments]);
+  }, [markedStart, markedEnd, segments, settings, audioDuration, selectedFileId, debouncedSaveSegments, readOnly]);
 
   // ---- 点击片段，聚焦波形 ----
   const handleSegmentClick = useCallback((segmentId: string) => {
@@ -514,6 +527,7 @@ export default function Home() {
 
   // ---- 删除片段 ----
   const handleDeleteSegment = useCallback((segmentId: string) => {
+    if (readOnly) return;
     const newSegments = segments.filter((s) => s.id !== segmentId);
     setSegments(newSegments);
     if (selectedSegmentId === segmentId) setSelectedSegmentId(null);
@@ -521,10 +535,11 @@ export default function Home() {
       debouncedSaveSegments(selectedFileId, newSegments);
     }
     toast.success('片段已删除');
-  }, [segments, selectedSegmentId, selectedFileId, debouncedSaveSegments]);
+  }, [segments, selectedSegmentId, selectedFileId, debouncedSaveSegments, readOnly]);
 
   // ---- 编辑片段 ----
   const handleSaveSegmentEdit = useCallback((updated: AudioSegment) => {
+    if (readOnly) return;
     const newSegments = segments
       .map((s) => (s.id === updated.id ? updated : s))
       .sort((a, b) => a.startTime - b.startTime);
@@ -533,7 +548,7 @@ export default function Home() {
       debouncedSaveSegments(selectedFileId, newSegments);
     }
     toast.success('片段已更新');
-  }, [segments, selectedFileId, debouncedSaveSegments]);
+  }, [segments, selectedFileId, debouncedSaveSegments, readOnly]);
 
   // ---- 更新设置 ----
   const handleSettingsChange = useCallback(async (newSettings: AppSettings) => {
@@ -556,6 +571,7 @@ export default function Home() {
 
   // ---- VAD 检测 ----
   const handleRunVAD = useCallback(async () => {
+    if (readOnly) return;
     if (!selectedFileId) {
       toast.error('请先选择音频文件');
       return;
@@ -603,7 +619,7 @@ export default function Home() {
     } finally {
       setIsRunningVAD(false);
     }
-  }, [selectedFileId, audioBuffer, ensureRawAudioData, settings, segments, debouncedSaveSegments]);
+  }, [selectedFileId, audioBuffer, ensureRawAudioData, settings, segments, debouncedSaveSegments, readOnly]);
 
   // ---- 清空所有片段 ----
   const handleClearSegments = useCallback(async () => {
@@ -670,13 +686,15 @@ export default function Home() {
 
         <div className="flex-1" />
 
+        {readOnly && <Badge variant="secondary" className="text-xs">worker 作业 · 只读查看</Badge>}
+        {user?.role === 'admin' && <Button size="sm" variant="outline" onClick={() => setLocation('/')} className="h-8 text-xs">返回管理台</Button>}
         <div className="hidden sm:flex items-center gap-1.5 text-xs font-mono text-slate-500">
           <UserRound className="w-3.5 h-3.5" />
           <span>{user?.username || 'worker'}</span>
         </div>
 
         {/* 设置按钮 */}
-        <Popover open={showSettings} onOpenChange={setShowSettings}>
+        {!readOnly && <Popover open={showSettings} onOpenChange={setShowSettings}>
           <PopoverTrigger asChild>
             <Button size="sm" variant="outline" className="h-8 gap-1.5 text-xs">
               <Settings className="w-3.5 h-3.5" />
@@ -686,7 +704,7 @@ export default function Home() {
           <PopoverContent align="end" className="w-72 p-4">
             <SettingsPanel settings={settings} onChange={handleSettingsChange} />
           </PopoverContent>
-        </Popover>
+        </Popover>}
         <Button size="sm" variant="ghost" onClick={() => logout()} className="h-8 gap-1.5 text-xs text-slate-500" title="退出当前账号">
           <LogOut className="w-3.5 h-3.5" />
           退出
@@ -698,7 +716,7 @@ export default function Home() {
         <aside className="w-56 flex-shrink-0 bg-white border-r border-slate-200 flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-3 py-2.5 border-b border-slate-100">
             <span className="text-xs font-semibold text-slate-600 uppercase tracking-wide">音频文件</span>
-            <Button
+            {!readOnly && <Button
               size="sm"
               variant="ghost"
               onClick={() => fileInputRef.current?.click()}
@@ -706,7 +724,7 @@ export default function Home() {
               title="上传音频"
             >
               <Upload className="w-3.5 h-3.5" />
-            </Button>
+            </Button>}
           </div>
 
           <div className="flex-1 overflow-y-auto p-2 space-y-1">
@@ -752,7 +770,7 @@ export default function Home() {
           </div>
 
           {/* 上传按钮 */}
-          {audioFiles.length > 0 && (
+          {!readOnly && audioFiles.length > 0 && (
             <div className="p-2 border-t border-slate-100">
               <Button
                 size="sm"
@@ -795,7 +813,7 @@ export default function Home() {
                     size="sm"
                     variant="outline"
                     onClick={handleRunVAD}
-                    disabled={isRunningVAD}
+                    disabled={isRunningVAD || readOnly}
                     className="h-8 gap-1.5 text-xs"
                   >
                     {isRunningVAD ? (
@@ -837,7 +855,7 @@ export default function Home() {
                   </DropdownMenu>
 
                   {/* 清空片段 */}
-                  {segments.length > 0 && (
+                  {!readOnly && segments.length > 0 && (
                     <Button
                       size="sm"
                       variant="ghost"
@@ -896,6 +914,7 @@ export default function Home() {
                   rawArrayBuffer={rawArrayBuffer}
                   wavInfo={wavInfo}
                   audioFileName={selectedFile.name}
+                  readOnly={readOnly}
                   onSelect={handleSegmentClick}
                   onDelete={handleDeleteSegment}
                   onEdit={(seg) => { setEditingSegment(seg); setShowEditDialog(true); }}

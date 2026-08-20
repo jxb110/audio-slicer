@@ -18,6 +18,7 @@ interface SegmentListProps {
   rawArrayBuffer?: ArrayBuffer | null;
   wavInfo?: WavInfo | null;
   audioFileName: string;
+  readOnly?: boolean;
   onSelect: (id: string) => void;
   onDelete: (id: string) => void;
   onEdit: (segment: AudioSegment) => void;
@@ -34,6 +35,7 @@ export default function SegmentList({
   rawArrayBuffer,
   wavInfo,
   audioFileName,
+  readOnly = false,
   onSelect,
   onDelete,
   onEdit,
@@ -143,7 +145,7 @@ export default function SegmentList({
 
             {/* 操作按钮（hover 显示） */}
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity bg-white/90 rounded-md px-1 py-0.5 shadow-sm border border-slate-200">
-              <Button
+              {!readOnly && <Button
                 size="sm"
                 variant="ghost"
                 onClick={(e) => { e.stopPropagation(); onEdit(seg); }}
@@ -151,7 +153,7 @@ export default function SegmentList({
                 title="编辑"
               >
                 <Edit2 className="w-3 h-3" />
-              </Button>
+              </Button>}
               <Button
                 size="sm"
                 variant="ghost"
@@ -166,7 +168,7 @@ export default function SegmentList({
                   <Download className="w-3 h-3" />
                 )}
               </Button>
-              <Button
+              {!readOnly && <Button
                 size="sm"
                 variant="ghost"
                 onClick={(e) => { e.stopPropagation(); onDelete(seg.id); }}
@@ -174,7 +176,7 @@ export default function SegmentList({
                 title="删除"
               >
                 <Trash2 className="w-3 h-3" />
-              </Button>
+              </Button>}
             </div>
           </div>
         );

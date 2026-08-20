@@ -28,18 +28,26 @@ function injectLoginBridge(html: string) {
         const workspaceBrand = document.querySelector('.workspace-brand');
         const workspaceStatus = document.querySelector('#workspaceStatus');
         let pullStartY = null;
-        const revealLogin = () => {
-          document.documentElement.style.setProperty('--on', '1');
-          form.closest('.login-form').classList.add('active');
-          workspaceBrand.classList.add('lamp-on');
-          workspaceStatus.textContent = 'WORKSPACE READY';
+        let lampOn = false;
+        const playLampSound = () => {
+          const sound = new Audio('https://assets.codepen.io/605876/click.mp3');
+          sound.currentTime = 0;
+          sound.play().catch(() => {});
+        };
+        const toggleLamp = () => {
+          lampOn = !lampOn;
+          document.documentElement.style.setProperty('--on', lampOn ? '1' : '0');
+          form.closest('.login-form').classList.toggle('active', lampOn);
+          workspaceBrand.classList.toggle('lamp-on', lampOn);
+          workspaceStatus.textContent = lampOn ? 'WORKSPACE READY' : 'PULL THE CORD';
+          playLampSound();
         };
         hit.addEventListener('pointerdown', (event) => {
           pullStartY = event.clientY;
           hit.setPointerCapture?.(event.pointerId);
         });
         hit.addEventListener('pointerup', (event) => {
-          if (pullStartY !== null && event.clientY - pullStartY > 50) revealLogin();
+          if (pullStartY !== null && event.clientY - pullStartY > 50) toggleLamp();
           pullStartY = null;
         });
         window.addEventListener('message', (event) => {

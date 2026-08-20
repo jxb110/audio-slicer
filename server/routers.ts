@@ -21,6 +21,15 @@ const segmentSchema = z.object({
   color: z.string().max(32).nullable().optional(),
   sortOrder: z.number().int().min(0),
 });
+const workspaceSchema = z.object({ ownerUserId: z.number().int().positive().optional() }).optional();
+
+function resolveWorkspaceOwner(ctx: { user: { id: number; role: "user" | "admin" } }, ownerUserId?: number) {
+  const resolved = ownerUserId ?? ctx.user.id;
+  if (resolved !== ctx.user.id && ctx.user.role !== "admin") {
+    throw new TRPCError({ code: "FORBIDDEN", message: "无权查看其他账号的作业" });
+  }
+  return resolved;
+}
 
 function presentUser(user: { id: number; username: string | null; name: string | null; email: string | null; role: "user" | "admin"; isActive: boolean }) {
   return { id: user.id, username: user.username, name: user.name, email: user.email, role: user.role, isActive: user.isActive };
@@ -77,9 +86,9 @@ export const appRouter = router({
     workOverview: adminProcedure.query(() => db.getAdminWorkOverview()),
   }),
   audio: router({
-    list: protectedProcedure.query(({ ctx }) => db.listAudioFilesForUser(ctx.user.id)),
-    get: protectedProcedure.input(z.object({ audioFileId: idSchema })).query(async ({ ctx, input }) => {
-      const file = await db.getAudioFileForUser(ctx.user.id, input.audioFileId);
+    list: protectedProcedure.input(workspaceSchema).query(({ ctx, input }) => db.listAudioFilesForUser(resolveWorkspaceOwner(ctx, input?.ownerUserId))),
+    get: protectedProcedure.input(z.object({ audioFileId: idSchema, ownerUserId: z.number().int().positive().optional() })).query(async ({ ctx, input }) => {
+      const file = await db.getAudioFileForUser(resolveWorkspaceOwner(ctx, input.ownerUserId), input.audioFileId);
       if (!file) throw new TRPCError({ code: "NOT_FOUND", message: "音频不存在或无权访问" });
       return file;
     }),
@@ -115,10 +124,11 @@ export const appRouter = router({
     }),
   }),
   segments: router({
-    list: protectedProcedure.input(z.object({ audioFileId: idSchema })).query(async ({ ctx, input }) => {
-      const audioFile = await db.getAudioFileForUser(ctx.user.id, input.audioFileId);
+    list: protectedProcedure.input(z.object({ audioFileId: idSchema, ownerUserId: z.number().int().positive().optional() })).query(async ({ ctx, input }) => {
+      const ownerUserId = resolveWorkspaceOwner(ctx, input.ownerUserId);
+      const audioFile = await db.getAudioFileForUser(ownerUserId, input.audioFileId);
       if (!audioFile) throw new TRPCError({ code: "NOT_FOUND", message: "音频不存在或无权访问" });
-      return db.listSegmentsForUser(ctx.user.id, input.audioFileId);
+      return db.listSegmentsForUser(ownerUserId, input.audioFileId);
     }),
     replaceAll: protectedProcedure
       .input(z.object({ audioFileId: idSchema, segments: z.array(segmentSchema).max(100000) }))
@@ -132,8 +142,8 @@ export const appRouter = router({
       }),
   }),
   settings: router({
-    get: protectedProcedure.query(async ({ ctx }) => {
-      const settings = await db.getSettingsForUser(ctx.user.id);
+    get: protectedProcedure.input(workspaceSchema).query(async ({ ctx, input }) => {
+      const settings = await db.getSettingsForUser(resolveWorkspaceOwner(ctx, input?.ownerUserId));
       return settings ?? { silencePrefixMs: 200, silenceSuffixMs: 200, vadEnergyThreshold: "0.01", vadMaxSilenceDurationMs: 500, vadMinSpeechDurationMs: 100 };
     }),
     save: protectedProcedure

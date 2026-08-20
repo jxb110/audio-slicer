@@ -1,7 +1,7 @@
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
+import { Route, Switch, useSearch } from "wouter";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Home from "./pages/Home";
@@ -11,9 +11,17 @@ import { useAuth } from "./_core/hooks/useAuth";
 
 function AuthenticatedHome() {
   const { user, loading } = useAuth();
+  const search = useSearch();
   if (loading) return <div className="min-h-screen bg-slate-950 text-slate-400 flex items-center justify-center font-mono text-sm">正在恢复本地会话...</div>;
   if (!user) return <LocalLogin />;
-  return user.role === "admin" ? <AdminConsole /> : <Home />;
+  const workspace = new URLSearchParams(search).get("workspace");
+  if (user.role === "admin") {
+    if (workspace === "self") return <Home />;
+    const workerId = Number(workspace);
+    if (Number.isInteger(workerId) && workerId > 0) return <Home workspaceUserId={workerId} readOnly />;
+    return <AdminConsole />;
+  }
+  return <Home />;
 }
 
 function Router() {

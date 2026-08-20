@@ -1317,6 +1317,14 @@
 
         };
 
+        function playLampClick() {
+            const click = new Audio(
+                "https://assets.codepen.io/605876/click.mp3"
+            );
+            click.currentTime = 0;
+            click.play().catch(() => {});
+        }
+
 
         const ON =
             document.querySelector(
@@ -1516,13 +1524,7 @@
                     );
 
 
-                    AUDIO.CLICK.currentTime =
-                        0;
-
-                    AUDIO.CLICK.play()
-                        .catch(
-                            () => {}
-                        );
+                    playLampClick();
 
 
                     if (

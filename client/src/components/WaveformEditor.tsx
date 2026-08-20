@@ -114,6 +114,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     const selectedSegmentIdRef = useRef(selectedSegmentId);
     const playRangeEndRef = useRef<number | null>(null);
     const playRangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const readyWaveformRef = useRef(false);
 
     useEffect(() => { segmentsRef.current = segments; }, [segments]);
     useEffect(() => { markedStartRef.current = markedStart; }, [markedStart]);
@@ -255,6 +256,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       });
 
       wavesurferRef.current = ws;
+      readyWaveformRef.current = false;
       // 大于数十分钟的音频不能在浏览器中完整解码。传入预计算峰值和时长后，
       // WaveSurfer只渲染峰值，播放交由HTML媒体元素流式处理。
       if (waveformPeaks?.length && waveformDuration && waveformDuration > 0) {
@@ -265,6 +267,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
 
       ws.on('ready', () => {
         const dur = ws.getDuration();
+        readyWaveformRef.current = true;
         durationRef.current = dur;
         setDuration(dur);
         setIsReady(true);
@@ -308,6 +311,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         if (playRangeTimerRef.current) clearTimeout(playRangeTimerRef.current);
         overlayLayerRef.current = null;
         wavesurferRef.current = null;
+        readyWaveformRef.current = false;
         setIsReady(false); setIsPlaying(false); setCurrentTime(0); setDuration(0);
         durationRef.current = 0; playRangeEndRef.current = null;
       };
@@ -421,8 +425,13 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
 
     // 缩放
     useEffect(() => {
-      if (wavesurferRef.current && isReady) {
-        wavesurferRef.current.zoom(zoom * getBasePxPerSecond(waveformDuration));
+      if (wavesurferRef.current && isReady && readyWaveformRef.current && durationRef.current > 0) {
+        try {
+          wavesurferRef.current.zoom(zoom * getBasePxPerSecond(waveformDuration));
+        } catch (_) {
+          // 切换/批量上传时旧实例可能已经销毁，下一次 ready 会重新应用缩放。
+          return;
+        }
         // 等待 WaveSurfer 重绘完成后再重绘 overlay（wrapper 宽度已变化）
         setTimeout(drawOverlay, 200);
       }
