@@ -1,6 +1,7 @@
 import { trpc } from "@/lib/trpc";
 import { TRPCClientError } from "@trpc/client";
 import { useCallback, useMemo } from "react";
+import { clearLocalSessionToken } from "@/lib/localSession";
 
 export function useAuth() {
   const utils = trpc.useUtils();
@@ -28,6 +29,7 @@ export function useAuth() {
       }
       throw error;
     } finally {
+      clearLocalSessionToken();
       utils.auth.me.setData(undefined, null);
       await utils.auth.me.invalidate();
     }

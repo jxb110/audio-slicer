@@ -4,6 +4,7 @@ import { httpBatchLink } from "@trpc/client";
 import { createRoot } from "react-dom/client";
 import superjson from "superjson";
 import App from "./App";
+import { getLocalSessionHeaders } from "./lib/localSession";
 import "./index.css";
 
 const queryClient = new QueryClient();
@@ -17,6 +18,10 @@ const trpcClient = trpc.createClient({
         return globalThis.fetch(input, {
           ...(init ?? {}),
           credentials: "include",
+          headers: {
+            ...getLocalSessionHeaders(),
+            ...(init?.headers ?? {}),
+          },
         });
       },
     }),

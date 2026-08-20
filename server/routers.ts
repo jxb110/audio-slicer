@@ -46,7 +46,7 @@ export const appRouter = router({
         if (!user) throw new TRPCError({ code: "UNAUTHORIZED", message: "账号、密码错误或账号已停用" });
         const token = await sdk.createSessionToken(user.openId, { name: user.name || user.username || "worker" });
         ctx.res.cookie(COOKIE_NAME, token, { ...getSessionCookieOptions(ctx.req), maxAge: ONE_YEAR_MS });
-        return presentUser(user);
+        return { user: presentUser(user), sessionToken: token };
       }),
     changePassword: protectedProcedure
       .input(z.object({ currentPassword: z.string().min(1).max(128), newPassword: passwordSchema }))
@@ -138,16 +138,23 @@ export const appRouter = router({
         if (input.segments.some(segment => segment.endMs <= segment.startMs || segment.endMs > audioFile.durationMs)) {
           throw new TRPCError({ code: "BAD_REQUEST", message: "片段时间范围无效" });
         }
+        const settings = await db.getSettingsForUser(ctx.user.id);
+        if (!settings?.allowSegmentOverlap) {
+          const ordered = [...input.segments].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs);
+          if (ordered.some((segment, index) => index > 0 && segment.startMs < ordered[index - 1].endMs)) {
+            throw new TRPCError({ code: "BAD_REQUEST", message: "当前设置不允许片段时间交叠" });
+          }
+        }
         return db.replaceSegmentsForUser(ctx.user.id, input.audioFileId, input.segments);
       }),
   }),
   settings: router({
     get: protectedProcedure.input(workspaceSchema).query(async ({ ctx, input }) => {
       const settings = await db.getSettingsForUser(resolveWorkspaceOwner(ctx, input?.ownerUserId));
-      return settings ?? { silencePrefixMs: 200, silenceSuffixMs: 200, vadEnergyThreshold: "0.01", vadMaxSilenceDurationMs: 500, vadMinSpeechDurationMs: 100 };
+      return settings ?? { silencePrefixMs: 200, silenceSuffixMs: 200, vadEnergyThreshold: "0.01", vadMaxSilenceDurationMs: 500, vadMinSpeechDurationMs: 100, allowSegmentOverlap: false };
     }),
     save: protectedProcedure
-      .input(z.object({ silencePrefixMs: z.number().int().min(0).max(10000), silenceSuffixMs: z.number().int().min(0).max(10000), vadEnergyThreshold: z.number().min(0).max(1), vadMaxSilenceDurationMs: z.number().int().min(0).max(10000), vadMinSpeechDurationMs: z.number().int().min(10).max(60000) }))
+      .input(z.object({ silencePrefixMs: z.number().int().min(0).max(10000), silenceSuffixMs: z.number().int().min(0).max(10000), vadEnergyThreshold: z.number().min(0).max(1), vadMaxSilenceDurationMs: z.number().int().min(0).max(10000), vadMinSpeechDurationMs: z.number().int().min(10).max(60000), allowSegmentOverlap: z.boolean().default(false) }))
       .mutation(({ ctx, input }) => db.saveSettingsForUser(ctx.user.id, { ...input, vadEnergyThreshold: String(input.vadEnergyThreshold) })),
   }),
 });

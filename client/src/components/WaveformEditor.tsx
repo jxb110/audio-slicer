@@ -19,6 +19,7 @@ import { AudioSegment } from '@/lib/audioExport';
 
 interface WaveformEditorProps {
   audioUrl: string;
+  authToken?: string | null;
   audioFile: File | null;
   /** 长音频的预计算峰值；存在时WaveSurfer不再解码完整音频。 */
   waveformPeaks?: number[] | null;
@@ -40,6 +41,7 @@ export interface WaveformEditorHandle {
   seekTo: (time: number) => void;
   getWaveSurfer: () => WaveSurfer | null;
   playRange: (start: number, end: number) => void;
+  play: () => void;
 }
 
 const SEGMENT_COLORS = [
@@ -89,7 +91,7 @@ export function getSegmentColor(index: number) {
 
 const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
   ({
-    audioUrl, waveformPeaks, waveformDuration, segments, silencePrefixMs, silenceSuffixMs,
+    audioUrl, authToken, waveformPeaks, waveformDuration, segments, silencePrefixMs, silenceSuffixMs,
     selectedSegmentId, onReady, onMarkStart, onMarkEnd,
     onConfirm, markedStart, markedEnd,
   }, ref) => {
@@ -114,6 +116,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     const selectedSegmentIdRef = useRef(selectedSegmentId);
     const playRangeEndRef = useRef<number | null>(null);
     const playRangeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const playRequestRef = useRef(0);
     const readyWaveformRef = useRef(false);
 
     useEffect(() => { segmentsRef.current = segments; }, [segments]);
@@ -127,17 +130,24 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
     const playRange = useCallback((start: number, end: number) => {
       const ws = wavesurferRef.current;
       if (!ws || durationRef.current === 0) return;
+
+      // 先使之前的播放请求失效并立刻静音，避免连续点片段时旧音频仍在后台播放。
+      const requestId = ++playRequestRef.current;
       if (playRangeTimerRef.current) clearTimeout(playRangeTimerRef.current);
+      playRangeTimerRef.current = null;
+      playRangeEndRef.current = null;
+      ws.pause();
+
       playRangeEndRef.current = end;
       ws.seekTo(start / durationRef.current);
       ws.play();
       const ms = (end - start) * 1000;
       playRangeTimerRef.current = setTimeout(() => {
-        if (wavesurferRef.current) {
+        if (playRequestRef.current === requestId && wavesurferRef.current) {
           wavesurferRef.current.pause();
           if (durationRef.current > 0) wavesurferRef.current.seekTo(start / durationRef.current);
         }
-        playRangeEndRef.current = null;
+        if (playRequestRef.current === requestId) playRangeEndRef.current = null;
       }, ms + 80);
     }, []);
 
@@ -148,6 +158,9 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
       },
       getWaveSurfer: () => wavesurferRef.current,
       playRange,
+      play: () => {
+        wavesurferRef.current?.play().catch(() => undefined);
+      },
     }));
 
     // ---- 绘制 overlay ----
@@ -253,6 +266,10 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         fillParent: true,
         interact: true,
         autoCenter: true,
+        fetchParams: {
+          credentials: 'include',
+          ...(authToken ? { headers: { Authorization: `Bearer ${authToken}` } } : {}),
+        },
       });
 
       wavesurferRef.current = ws;
@@ -315,7 +332,7 @@ const WaveformEditor = forwardRef<WaveformEditorHandle, WaveformEditorProps>(
         setIsReady(false); setIsPlaying(false); setCurrentTime(0); setDuration(0);
         durationRef.current = 0; playRangeEndRef.current = null;
       };
-    }, [audioUrl, waveformDuration, waveformPeaks]);
+    }, [audioUrl, authToken, waveformDuration, waveformPeaks]);
 
     // ---- 鼠标事件处理（在 ready 后挂载到 Shadow DOM wrapper）----
     // 左键：用 WaveSurfer 的 interaction 事件（内部已正确计算时间）

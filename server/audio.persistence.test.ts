@@ -66,11 +66,13 @@ describe("音频持久化数据库流程", () => {
       vadEnergyThreshold: "0.02",
       vadMaxSilenceDurationMs: 450,
       vadMinSpeechDurationMs: 120,
+      allowSegmentOverlap: false,
     });
     await expect(getSettingsForUser(userId)).resolves.toMatchObject({
       silencePrefixMs: 150,
       silenceSuffixMs: 180,
       vadEnergyThreshold: "0.02",
+      allowSegmentOverlap: false,
     });
 
     await expect(deleteAudioFileForUser(userId, audioFileId)).resolves.toBe(true);

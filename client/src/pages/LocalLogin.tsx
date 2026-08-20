@@ -1,6 +1,7 @@
 import { trpc } from "@/lib/trpc";
 import loginReference from "@/templates/login-reference.html?raw";
 import { FormEvent, useEffect, useMemo, useRef } from "react";
+import { setLocalSessionToken } from "@/lib/localSession";
 
 type LoginMessage = {
   type: "audio-slicer-login";
@@ -29,10 +30,33 @@ function injectLoginBridge(html: string) {
         const workspaceStatus = document.querySelector('#workspaceStatus');
         let pullStartY = null;
         let lampOn = false;
+        let audioContext = null;
+        const unlockAudio = () => {
+          const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextClass) return;
+          if (!audioContext) audioContext = new AudioContextClass();
+          if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+        };
+        const playFallbackTone = () => {
+          if (!audioContext || audioContext.state !== 'running') return;
+          const now = audioContext.currentTime;
+          const oscillator = audioContext.createOscillator();
+          const gain = audioContext.createGain();
+          oscillator.type = 'sine';
+          oscillator.frequency.setValueAtTime(lampOn ? 720 : 440, now);
+          oscillator.frequency.exponentialRampToValueAtTime(lampOn ? 980 : 300, now + 0.95);
+          gain.gain.setValueAtTime(0.0001, now);
+          gain.gain.exponentialRampToValueAtTime(0.09, now + 0.03);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.98);
+          oscillator.connect(gain).connect(audioContext.destination);
+          oscillator.start(now);
+          oscillator.stop(now + 1);
+        };
         const playLampSound = () => {
-          const sound = new Audio('https://assets.codepen.io/605876/click.mp3');
-          sound.currentTime = 0;
-          sound.play().catch(() => {});
+          // 原始网页的远程MP3会受到浏览器自动播放、跨域和音频设备休眠影响。
+          // 这里在同一拉线手势内直接播放1秒合成提示音，避免依赖外部播放状态。
+          unlockAudio();
+          playFallbackTone();
         };
         const toggleLamp = () => {
           lampOn = !lampOn;
@@ -43,6 +67,8 @@ function injectLoginBridge(html: string) {
           playLampSound();
         };
         hit.addEventListener('pointerdown', (event) => {
+          // 必须在真实用户手势阶段解锁，避免静默环境下被浏览器自动播放策略拦截。
+          unlockAudio();
           pullStartY = event.clientY;
           hit.setPointerCapture?.(event.pointerId);
         });
@@ -65,8 +91,9 @@ export default function LocalLogin() {
   const utils = trpc.useUtils();
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const login = trpc.auth.login.useMutation({
-    onSuccess: async user => {
-      utils.auth.me.setData(undefined, user);
+    onSuccess: async result => {
+      setLocalSessionToken(result.sessionToken);
+      utils.auth.me.setData(undefined, result.user);
       await utils.auth.me.invalidate();
     },
   });

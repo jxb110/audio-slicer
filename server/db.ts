@@ -328,6 +328,7 @@ export async function saveSettingsForUser(
     vadEnergyThreshold: string;
     vadMaxSilenceDurationMs: number;
     vadMinSpeechDurationMs: number;
+    allowSegmentOverlap: boolean;
   },
 ) {
   const db = await getDb();

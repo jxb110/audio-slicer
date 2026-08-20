@@ -20,6 +20,7 @@ export interface AppSettings {
   vadEnergyThreshold: number;
   vadMaxSilenceDuration: number;
   vadMinSpeechDuration: number;
+  allowSegmentOverlap: boolean;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -28,4 +29,5 @@ export const DEFAULT_SETTINGS: AppSettings = {
   vadEnergyThreshold: 0.01,
   vadMaxSilenceDuration: 0.5,
   vadMinSpeechDuration: 0.1,
+  allowSegmentOverlap: false,
 };

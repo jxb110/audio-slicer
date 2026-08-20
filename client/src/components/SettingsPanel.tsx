@@ -17,7 +17,7 @@ interface SettingsPanelProps {
 }
 
 export default function SettingsPanel({ settings, onChange }: SettingsPanelProps) {
-  const update = (key: keyof AppSettings, value: number) => {
+  const update = (key: keyof AppSettings, value: number | boolean) => {
     onChange({ ...settings, [key]: value });
   };
 
@@ -74,6 +74,27 @@ export default function SettingsPanel({ settings, onChange }: SettingsPanelProps
               className="font-mono text-sm h-8"
             />
           </div>
+        </div>
+      </div>
+
+      {/* 片段交叠策略 */}
+      <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <Label className="text-xs font-medium text-slate-700">允许片段交叠</Label>
+            <p className="mt-1 text-[11px] leading-4 text-slate-500">
+              默认关闭。关闭时，已有片段范围内不可再标记IN/OUT，保存与编辑也会阻止时间交叠。
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={settings.allowSegmentOverlap}
+            onClick={() => update('allowSegmentOverlap', !settings.allowSegmentOverlap)}
+            className={`relative mt-0.5 h-5 w-9 shrink-0 rounded-full transition-colors ${settings.allowSegmentOverlap ? 'bg-blue-600' : 'bg-slate-300'}`}
+          >
+            <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${settings.allowSegmentOverlap ? 'translate-x-4' : 'translate-x-0.5'}`} />
+          </button>
         </div>
       </div>
 

@@ -104,6 +104,7 @@ export const userSlicerSettings = mysqlTable(
     vadEnergyThreshold: varchar("vadEnergyThreshold", { length: 32 }).default("0.01").notNull(),
     vadMaxSilenceDurationMs: int("vadMaxSilenceDurationMs").default(500).notNull(),
     vadMinSpeechDurationMs: int("vadMinSpeechDurationMs").default(100).notNull(),
+    allowSegmentOverlap: boolean("allowSegmentOverlap").default(false).notNull(),
     updatedAt: timestamp("updatedAt").defaultNow().onUpdateNow().notNull(),
   },
   table => [uniqueIndex("userSlicerSettings_userId_unique").on(table.userId)],

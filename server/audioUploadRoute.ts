@@ -1,5 +1,6 @@
 import express, { type Express } from "express";
 import { sdk } from "./_core/sdk";
+import { Readable } from "node:stream";
 import { storeAudioUpload } from "./audioStorage";
 import * as db from "./db";
 import { storageGetSignedUrl } from "./storage";
@@ -39,8 +40,23 @@ export function registerAudioUploadRoute(app: Express): void {
         return;
       }
       const signedUrl = await storageGetSignedUrl(audio.storageKey);
-      res.set("Cache-Control", "no-store");
-      res.redirect(307, signedUrl);
+      const range = req.header("range");
+      const upstream = await fetch(signedUrl, {
+        headers: range ? { Range: range } : undefined,
+      });
+      if (!upstream.ok || !upstream.body) {
+        throw new Error(`对象存储读取失败（${upstream.status}）`);
+      }
+
+      const passthroughHeaders = ["content-length", "content-range", "accept-ranges"] as const;
+      for (const header of passthroughHeaders) {
+        const value = upstream.headers.get(header);
+        if (value) res.set(header, value);
+      }
+      res.status(upstream.status);
+      res.set("Content-Type", audio.mimeType || upstream.headers.get("content-type") || "application/octet-stream");
+      res.set("Cache-Control", "private, max-age=300");
+      Readable.fromWeb(upstream.body as any).pipe(res);
     } catch (error) {
       console.error("[Audio Download] Failed:", error);
       res.status(502).json({ error: "原始音频读取失败" });

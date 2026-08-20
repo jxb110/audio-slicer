@@ -21,6 +21,7 @@ export interface AppSettings {
   vadEnergyThreshold: number;
   vadMaxSilenceDuration: number;
   vadMinSpeechDuration: number;
+  allowSegmentOverlap: boolean;
 }
 
 export interface ProjectData {
@@ -172,6 +173,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   vadEnergyThreshold: 0.01,
   vadMaxSilenceDuration: 0.5,
   vadMinSpeechDuration: 0.1,
+  allowSegmentOverlap: false,
 };
 
 export async function saveSettings(settings: AppSettings): Promise<void> {
@@ -195,4 +197,3 @@ export async function loadSettings(): Promise<AppSettings> {
     req.onsuccess = () => resolve(req.result ? { ...DEFAULT_SETTINGS, ...req.result } : DEFAULT_SETTINGS);
   });
 }
-

@@ -63,6 +63,7 @@ import SegmentEditDialog from '@/components/SegmentEditDialog';
 import SettingsPanel from '@/components/SettingsPanel';
 import { AudioSegment, parseWavHeader, WavInfo, decodeAudioForVAD, downloadSegmentsAsZip, exportSegmentsAsCSV } from '@/lib/audioExport';
 import { trpc } from '@/lib/trpc';
+import { getLocalSessionHeaders, getLocalSessionToken } from '@/lib/localSession';
 import { useAuth } from '@/_core/hooks/useAuth';
 import { useLocation } from 'wouter';
 import { analyzeAudioForUpload } from '@/lib/longAudio';
@@ -156,6 +157,7 @@ function EmptyWaveformPreview() {
 
 export default function Home({ workspaceUserId, readOnly = false }: { workspaceUserId?: number; readOnly?: boolean }) {
   const { user, logout } = useAuth();
+  const authToken = getLocalSessionToken();
   const [, setLocation] = useLocation();
   // ---- 文件状态 ----
   const utils = trpc.useUtils();
@@ -216,6 +218,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
   // 并发保护：记录当前正在加载的 fileId，避免多次触发
   const loadingFileIdRef = useRef<string | null>(null);
   const selectedFileIdRef = useRef<string | null>(null);
+  const autoPlaySelectedFileRef = useRef(false);
   useEffect(() => { selectedFileIdRef.current = selectedFileId; }, [selectedFileId]);
 
   const segmentsQuery = trpc.segments.list.useQuery(
@@ -232,6 +235,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
         vadEnergyThreshold: Number(settingsQuery.data.vadEnergyThreshold),
         vadMaxSilenceDuration: settingsQuery.data.vadMaxSilenceDurationMs / 1000,
         vadMinSpeechDuration: settingsQuery.data.vadMinSpeechDurationMs / 1000,
+        allowSegmentOverlap: settingsQuery.data.allowSegmentOverlap ?? false,
       });
       return;
     }
@@ -281,7 +285,10 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
     if (!selectedFile) return null;
     try {
       const query = workspaceUserId ? `?ownerUserId=${workspaceUserId}` : '';
-      const response = await fetch(`/api/audio/raw/${encodeURIComponent(selectedFile.id)}${query}`);
+      const response = await fetch(`/api/audio/raw/${encodeURIComponent(selectedFile.id)}${query}`, {
+        credentials: 'include',
+        headers: getLocalSessionHeaders(),
+      });
       if (!response.ok) throw new Error(`下载音频失败（${response.status}）`);
       const data = await response.arrayBuffer();
       setRawArrayBuffer(data);
@@ -329,10 +336,21 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
 
   // ---- 选择文件 ----
   const handleSelectFile = useCallback(async (fileId: string) => {
-    if (fileId === selectedFileId) return;
+    if (fileId === selectedFileId) {
+      if (readOnly) waveformRef.current?.play();
+      return;
+    }
     loadingFileIdRef.current = null; // 取消当前加载
+    autoPlaySelectedFileRef.current = readOnly;
     setSelectedFileId(fileId);
-  }, [selectedFileId]);
+  }, [readOnly, selectedFileId]);
+
+  const handleWaveformReady = useCallback((duration: number) => {
+    setAudioDuration(duration);
+    if (!autoPlaySelectedFileRef.current) return;
+    autoPlaySelectedFileRef.current = false;
+    window.setTimeout(() => waveformRef.current?.play(), 0);
+  }, []);
 
   // selectedFileId 变化时触发加载（唯一触发点）
   useEffect(() => {
@@ -459,14 +477,22 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
 
   // ---- 标记开始 ----
   const handleMarkStart = useCallback((time: number) => {
+    if (!settings.allowSegmentOverlap && segments.some(segment => time > segment.startTime && time < segment.endTime)) {
+      toast.warning('当前设置不允许片段交叠，请在已有片段范围外标记IN');
+      return;
+    }
     setMarkedStart(time);
     setMarkedEnd(null); // 重置结束标记
-  }, []);
+  }, [segments, settings.allowSegmentOverlap]);
 
   // ---- 标记结束 ----
   const handleMarkEnd = useCallback((time: number) => {
+    if (!settings.allowSegmentOverlap && segments.some(segment => time > segment.startTime && time < segment.endTime)) {
+      toast.warning('当前设置不允许片段交叠，请在已有片段范围外标记OUT');
+      return;
+    }
     setMarkedEnd(time);
-  }, []);
+  }, [segments, settings.allowSegmentOverlap]);
 
   // ---- 确认保存片段（空格键）----
   const handleConfirm = useCallback(() => {
@@ -491,6 +517,11 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
     const suffixSec = settings.silenceSuffixMs / 1000;
     const finalStart = Math.max(0, start - prefixSec);
     const finalEnd = Math.min(audioDuration || Infinity, end + suffixSec);
+
+    if (!settings.allowSegmentOverlap && segments.some(segment => finalStart < segment.endTime && finalEnd > segment.startTime)) {
+      toast.warning('加入首尾静音后会与已有片段交叠，请重新标记或开启“允许片段交叠”');
+      return;
+    }
 
     const newSegment: AudioSegment = {
       id: nanoid(),
@@ -540,6 +571,10 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
   // ---- 编辑片段 ----
   const handleSaveSegmentEdit = useCallback((updated: AudioSegment) => {
     if (readOnly) return;
+    if (!settings.allowSegmentOverlap && segments.some(segment => segment.id !== updated.id && updated.startTime < segment.endTime && updated.endTime > segment.startTime)) {
+      toast.warning('编辑后的时间会与已有片段交叠，请调整时间或开启“允许片段交叠”');
+      return;
+    }
     const newSegments = segments
       .map((s) => (s.id === updated.id ? updated : s))
       .sort((a, b) => a.startTime - b.startTime);
@@ -548,7 +583,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
       debouncedSaveSegments(selectedFileId, newSegments);
     }
     toast.success('片段已更新');
-  }, [segments, selectedFileId, debouncedSaveSegments, readOnly]);
+  }, [segments, selectedFileId, debouncedSaveSegments, readOnly, settings.allowSegmentOverlap]);
 
   // ---- 更新设置 ----
   const handleSettingsChange = useCallback(async (newSettings: AppSettings) => {
@@ -561,6 +596,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
         vadEnergyThreshold: newSettings.vadEnergyThreshold,
         vadMaxSilenceDurationMs: Math.round(newSettings.vadMaxSilenceDuration * 1000),
         vadMinSpeechDurationMs: Math.round(newSettings.vadMinSpeechDuration * 1000),
+        allowSegmentOverlap: newSettings.allowSegmentOverlap,
       });
       await utils.settings.get.invalidate();
     } catch (err) {
@@ -600,7 +636,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
         return;
       }
 
-      const newSegs: AudioSegment[] = vadSegments.map((seg) => ({
+      const detectedSegments: AudioSegment[] = vadSegments.map((seg) => ({
         id: nanoid(),
         startTime: seg.startTime,
         endTime: seg.endTime,
@@ -608,12 +644,20 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
         isConfirmed: false,
       }));
 
+      const newSegs = settings.allowSegmentOverlap
+        ? detectedSegments
+        : detectedSegments.filter((candidate, index, all) => {
+            const againstExisting = segments.some(segment => candidate.startTime < segment.endTime && candidate.endTime > segment.startTime);
+            const againstEarlierDetected = all.slice(0, index).some(segment => candidate.startTime < segment.endTime && candidate.endTime > segment.startTime);
+            return !againstExisting && !againstEarlierDetected;
+          });
+
       const merged = [...segments, ...newSegs].sort((a, b) => a.startTime - b.startTime);
       setSegments(merged);
       if (selectedFileId) {
         debouncedSaveSegments(selectedFileId, merged);
       }
-      toast.success(`VAD 检测到 ${newSegs.length} 个片段`);
+      toast.success(`VAD 检测到 ${newSegs.length} 个片段${newSegs.length < detectedSegments.length ? '（已过滤交叠片段）' : ''}`);
     } catch (err) {
       toast.error('VAD 检测失败: ' + (err as Error).message);
     } finally {
@@ -882,6 +926,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
                   <WaveformEditor
                     ref={waveformRef}
                     audioUrl={audioUrl}
+                    authToken={authToken}
                     audioFile={null}
                     waveformPeaks={selectedFile.waveformPeaks}
                     waveformDuration={selectedFile.durationMs / 1000}
@@ -891,7 +936,7 @@ export default function Home({ workspaceUserId, readOnly = false }: { workspaceU
                     selectedSegmentId={selectedSegmentId}
                     markedStart={markedStart}
                     markedEnd={markedEnd}
-                    onReady={setAudioDuration}
+                    onReady={handleWaveformReady}
                     onMarkStart={handleMarkStart}
                     onMarkEnd={handleMarkEnd}
                     onConfirm={handleConfirm}

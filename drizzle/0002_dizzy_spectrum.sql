@@ -1,0 +1,1 @@
+ALTER TABLE `userSlicerSettings` ADD `allowSegmentOverlap` boolean DEFAULT false NOT NULL;
